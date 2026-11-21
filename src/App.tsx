@@ -3,7 +3,7 @@ import { CarLifeAppLauncherScreen } from './components/CarLifeAppLauncherScreen'
 import { AppsGridIcon, CheckCircleIcon, SettingsIcon } from './components/CockpitIcons';
 import { OnboardingChecklistScreen } from './components/OnboardingChecklistScreen';
 import { UnifiedSettingsAndDiagnosticsScreen } from './components/UnifiedSettingsAndDiagnosticsScreen';
-import { bridgeController } from './store/bridgeStore';
+import { AppMode, bridgeController } from './store/bridgeStore';
 
 type TabIndex = 0 | 1 | 2;
 
@@ -99,6 +99,11 @@ export function App() {
             a11yEnabled={checklistStatus.step3AccessibilityEnabled}
             mediaState={mediaState}
             lastLaunchStatus={lastLaunchStatus}
+            visiblePackages={runtimeState.launcherVisiblePackages}
+            showVdNavButtons={
+              runtimeState.appMode !== AppMode.SHIZUKU_COCKPIT ||
+              runtimeState.shizukuVdNavButtonsEnabled
+            }
             onPlayPause={() => bridgeController.togglePlayPause()}
             onNextTrack={() => bridgeController.skipNextTrack()}
             onPreviousTrack={() => bridgeController.skipPreviousTrack()}
@@ -130,15 +135,43 @@ export function App() {
             lastDecodedBreakdown={lastDecodedBreakdown}
             mediaStream={mediaStream}
             onSetAppMode={(mode) => bridgeController.setAppMode(mode)}
+            onRequestShizukuPermission={() => bridgeController.requestShizukuPermission()}
+            onOpenShizukuApp={() => bridgeController.openShizukuApp()}
+            onOpenDeveloperSettings={() => bridgeController.openDeveloperSettings()}
+            onToggleShizukuDaemon={() => bridgeController.toggleShizukuDaemonState()}
             onSetLogPacketsInUi={(enabled) => bridgeController.setLogPacketsInUi(enabled)}
+            onSetTransmitAudioOverUsb={(enabled) => bridgeController.setTransmitAudioOverUsb(enabled)}
             onSetMutePhoneSpeaker={(enabled) =>
               bridgeController.setMutePhoneSpeakerDuringUsbAudio(enabled)
             }
-            onToggleAudioCapture={() => bridgeController.toggleAudioCapture()}
-            onSetVideoSourceMode={(mode) => bridgeController.setVideoSourceMode(mode)}
-            onSetAppLaunchMode={(mode) => bridgeController.setAppLaunchMode(mode)}
+            onSetAutoStartOnUsbAttach={(enabled) =>
+              bridgeController.setAutoStartOnUsbAttach(enabled)
+            }
+            onSetKeepPhoneScreenOn={(enabled) => bridgeController.setKeepPhoneScreenOn(enabled)}
+            onSetForceLandscapeMirroring={(enabled) =>
+              bridgeController.setForceLandscapeMirroring(enabled)
+            }
+            onToggleLauncherAppVisibility={(pkg) =>
+              bridgeController.toggleLauncherAppVisibility(pkg)
+            }
+            onSetLauncherVisiblePreset={(preset) =>
+              bridgeController.setLauncherVisiblePreset(preset)
+            }
+            onSetShizukuVdNavButtonsEnabled={(enabled) =>
+              bridgeController.setShizukuVdNavButtonsEnabled(enabled)
+            }
+            onSetShizukuVdNavButtonsLayout={(layout) =>
+              bridgeController.setShizukuVdNavButtonsLayout(layout)
+            }
+            onTriggerVdHome={() => bridgeController.triggerDockHome()}
+            onTriggerVdBack={() => bridgeController.triggerDockBack()}
+            onSetCanvasTestCardEnabled={(enabled) =>
+              bridgeController.setCanvasTestCardEnabled(enabled)
+            }
             onSetHandshakeProfile={(id) => bridgeController.setHandshakeProfile(id)}
             onSelectResolution={(w, h) => bridgeController.setResolution(w, h)}
+            onSelectFps={(fps) => bridgeController.setFps(fps)}
+            onSelectDensityDpi={(dpi) => bridgeController.setDensityDpi(dpi)}
             onSelectBitrate={(kbps) => bridgeController.setBitrateKbps(kbps)}
             onSetVideoHeaderMode={(aoa) => bridgeController.setVideoHeaderMode(aoa)}
             onToggleProjection={() => bridgeController.toggleProjection()}
@@ -146,7 +179,6 @@ export function App() {
             onToggleAccessibility={() =>
               bridgeController.toggleChecklistStep('step3AccessibilityEnabled')
             }
-            onToggleOverlay={() => bridgeController.toggleChecklistStep('step2OverlayGranted')}
             onRequestMediaProjection={() => bridgeController.requestMediaProjection()}
             onScanAndAttachUsb={() => bridgeController.scanAndAttachUsb()}
             onStopBridge={() => bridgeController.stopBridge()}

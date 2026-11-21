@@ -19,6 +19,8 @@ interface CarLifeAppLauncherScreenProps {
   a11yEnabled: boolean;
   mediaState: CockpitMediaState;
   lastLaunchStatus: string;
+  visiblePackages?: string[];
+  showVdNavButtons?: boolean;
   onPlayPause: () => void;
   onNextTrack: () => void;
   onPreviousTrack: () => void;
@@ -136,6 +138,8 @@ export const CarLifeAppLauncherScreen: React.FC<CarLifeAppLauncherScreenProps> =
   a11yEnabled,
   mediaState,
   lastLaunchStatus,
+  visiblePackages,
+  showVdNavButtons = true,
   onPlayPause,
   onNextTrack,
   onPreviousTrack,
@@ -155,13 +159,22 @@ export const CarLifeAppLauncherScreen: React.FC<CarLifeAppLauncherScreenProps> =
     return () => window.clearInterval(id);
   }, []);
 
+  const enabledApps = useMemo(() => {
+    if (!visiblePackages || visiblePackages.length === 0) {
+      return COCKPIT_INSTALLED_APPS;
+    }
+    const set = new Set(visiblePackages);
+    const matching = COCKPIT_INSTALLED_APPS.filter((a) => set.has(a.packageName));
+    return matching.length > 0 ? matching : COCKPIT_INSTALLED_APPS;
+  }, [visiblePackages]);
+
   const filteredApps = useMemo(() => {
     if (selectedFilter === 1) {
-      const priority = COCKPIT_INSTALLED_APPS.filter((a) => a.isAutomotivePriority);
-      return priority.length > 0 ? priority : COCKPIT_INSTALLED_APPS;
+      const priority = enabledApps.filter((a) => a.isAutomotivePriority);
+      return priority.length > 0 ? priority : enabledApps;
     }
-    return COCKPIT_INSTALLED_APPS;
-  }, [selectedFilter]);
+    return enabledApps;
+  }, [enabledApps, selectedFilter]);
 
   const handleHome = () => {
     setSelectedFilter(0);
@@ -204,26 +217,28 @@ export const CarLifeAppLauncherScreen: React.FC<CarLifeAppLauncherScreenProps> =
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 pt-1">
-            <button
-              type="button"
-              onClick={handleHome}
-              data-testid="dock_home_button"
-              className="h-12 rounded-xl bg-[#1E2636] border border-[#222938] px-2 flex items-center justify-center gap-1.5 hover:border-[#00B4D8]/60 active:scale-[0.98] transition cursor-pointer"
-            >
-              <HomeIcon className="w-[18px] h-[18px] text-[#00B4D8] shrink-0" />
-              <span className="text-[13px] font-medium text-[#F1F5F9] truncate">Домой</span>
-            </button>
-            <button
-              type="button"
-              onClick={onBackPressed}
-              data-testid="dock_back_button"
-              className="h-12 rounded-xl bg-[#1E2636] border border-[#222938] px-2 flex items-center justify-center gap-1.5 hover:border-[#00B4D8]/60 active:scale-[0.98] transition cursor-pointer"
-            >
-              <ArrowBackIcon className="w-[18px] h-[18px] text-[#F1F5F9] shrink-0" />
-              <span className="text-[13px] font-medium text-[#F1F5F9] truncate">Назад</span>
-            </button>
-          </div>
+          {showVdNavButtons && (
+            <div className="grid grid-cols-2 gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handleHome}
+                data-testid="dock_home_button"
+                className="h-12 rounded-xl bg-[#1E2636] border border-[#222938] px-2 flex items-center justify-center gap-1.5 hover:border-[#00B4D8]/60 active:scale-[0.98] transition cursor-pointer"
+              >
+                <HomeIcon className="w-[18px] h-[18px] text-[#00B4D8] shrink-0" />
+                <span className="text-[13px] font-medium text-[#F1F5F9] truncate">Домой</span>
+              </button>
+              <button
+                type="button"
+                onClick={onBackPressed}
+                data-testid="dock_back_button"
+                className="h-12 rounded-xl bg-[#1E2636] border border-[#222938] px-2 flex items-center justify-center gap-1.5 hover:border-[#00B4D8]/60 active:scale-[0.98] transition cursor-pointer"
+              >
+                <ArrowBackIcon className="w-[18px] h-[18px] text-[#F1F5F9] shrink-0" />
+                <span className="text-[13px] font-medium text-[#F1F5F9] truncate">Назад</span>
+              </button>
+            </div>
+          )}
         </div>
 
         <DockCompactMediaPlayer
@@ -237,33 +252,35 @@ export const CarLifeAppLauncherScreen: React.FC<CarLifeAppLauncherScreenProps> =
 
       {/* Mobile / Narrow Top Compact Dock */}
       <div className="flex md:hidden flex-col gap-2 rounded-2xl bg-[#151A24] border border-[#222938] p-3 shrink-0">
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleHome}
-            data-testid="dock_home_button_mobile"
-            className="flex-1 h-12 rounded-xl bg-[#1E2636] border border-[#222938] px-2 flex items-center justify-center gap-1.5 cursor-pointer"
-          >
-            <HomeIcon className="w-[18px] h-[18px] text-[#00B4D8]" />
-            <span className="text-[13px] font-medium text-[#F1F5F9]">Домой</span>
-          </button>
-          <button
-            type="button"
-            onClick={onBackPressed}
-            data-testid="dock_back_button_mobile"
-            className="flex-1 h-12 rounded-xl bg-[#1E2636] border border-[#222938] px-2 flex items-center justify-center gap-1.5 cursor-pointer"
-          >
-            <ArrowBackIcon className="w-[18px] h-[18px] text-[#F1F5F9]" />
-            <span className="text-[13px] font-medium text-[#F1F5F9]">Назад</span>
-          </button>
-          <div
-            className={`rounded-[10px] px-2.5 py-2 text-[11px] font-semibold shrink-0 ${
-              a11yEnabled ? 'bg-[#064E3B] text-[#10B981]' : 'bg-[#451A03] text-[#F59E0B]'
-            }`}
-          >
-            {isVdActive ? `VD #${virtualDisplayId}` : a11yEnabled ? 'Touch ON' : 'Touch OFF'}
+        {showVdNavButtons && (
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleHome}
+              data-testid="dock_home_button_mobile"
+              className="flex-1 h-12 rounded-xl bg-[#1E2636] border border-[#222938] px-2 flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <HomeIcon className="w-[18px] h-[18px] text-[#00B4D8]" />
+              <span className="text-[13px] font-medium text-[#F1F5F9]">Домой</span>
+            </button>
+            <button
+              type="button"
+              onClick={onBackPressed}
+              data-testid="dock_back_button_mobile"
+              className="flex-1 h-12 rounded-xl bg-[#1E2636] border border-[#222938] px-2 flex items-center justify-center gap-1.5 cursor-pointer"
+            >
+              <ArrowBackIcon className="w-[18px] h-[18px] text-[#F1F5F9]" />
+              <span className="text-[13px] font-medium text-[#F1F5F9]">Назад</span>
+            </button>
+            <div
+              className={`rounded-[10px] px-2.5 py-2 text-[11px] font-semibold shrink-0 ${
+                a11yEnabled ? 'bg-[#064E3B] text-[#10B981]' : 'bg-[#451A03] text-[#F59E0B]'
+              }`}
+            >
+              {isVdActive ? `VD #${virtualDisplayId}` : a11yEnabled ? 'Touch ON' : 'Touch OFF'}
+            </div>
           </div>
-        </div>
+        )}
 
         <DockCompactMediaPlayer
           mediaState={mediaState}
@@ -288,7 +305,7 @@ export const CarLifeAppLauncherScreen: React.FC<CarLifeAppLauncherScreenProps> =
                   : 'bg-[#1E2636] border-[#222938] text-[#94A3B8] hover:text-[#F1F5F9]'
               }`}
             >
-              Все ({COCKPIT_INSTALLED_APPS.length})
+              Все ({enabledApps.length})
             </button>
             <button
               type="button"

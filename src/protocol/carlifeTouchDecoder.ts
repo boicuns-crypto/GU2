@@ -278,3 +278,146 @@ export const CarLifeTouchDecoder = {
     }
   },
 };
+
+export type TouchDispatchTarget =
+  | 'PRESENTATION_DECOR_VIEW'
+  | 'ACCESSIBILITY_DISPATCH_GESTURE'
+  | 'SHIZUKU_INPUT_MANAGER';
+
+export interface TouchRouteState {
+  lastDownTimeMs: number | null;
+  activeGestureDown: boolean;
+}
+
+export interface TouchRouteResult {
+  target: TouchDispatchTarget;
+  action: CarLifeTouchEventType;
+  downTimeMs: number;
+  eventTimeMs: number;
+  rawX: number;
+  rawY: number;
+  huWidth: number;
+  huHeight: number;
+  dispatchedX: number;
+  dispatchedY: number;
+  boundsWidth: number;
+  boundsHeight: number;
+  displayId: number;
+  blockedAccessibility: boolean;
+  summary: string;
+}
+
+export const DEFAULT_S26U_WINDOW_BOUNDS = {
+  width: 3120,
+  height: 1440,
+};
+
+export function routeTouchEventByMode(
+  mode: 'cockpit' | 'mirroring' | 'shizuku_cockpit',
+  action: CarLifeTouchEventType,
+  rawX: number,
+  rawY: number,
+  huWidth: number,
+  huHeight: number,
+  routeState: TouchRouteState,
+  nowMs = Date.now(),
+  phoneBounds = DEFAULT_S26U_WINDOW_BOUNDS,
+  virtualDisplayId = 2
+): { result: TouchRouteResult; nextState: TouchRouteState } {
+  const isDown = action === CarLifeTouchEventType.DOWN || action === CarLifeTouchEventType.SINGLE_CLICK;
+  const isUp = action === CarLifeTouchEventType.UP || action === CarLifeTouchEventType.SINGLE_CLICK;
+
+  let downTimeMs = routeState.lastDownTimeMs ?? nowMs;
+  if (isDown) {
+    downTimeMs = nowMs;
+  }
+
+  const nextState: TouchRouteState = {
+    lastDownTimeMs: isUp ? null : downTimeMs,
+    activeGestureDown: isDown ? true : isUp ? false : routeState.activeGestureDown,
+  };
+
+  if (mode === 'shizuku_cockpit') {
+    const [scaledX, scaledY] = scaleTouchCoordinates(rawX, rawY, 1280, 720, huWidth, huHeight);
+    const sx = Math.round(scaledX);
+    const sy = Math.round(scaledY);
+    return {
+      nextState,
+      result: {
+        target: 'SHIZUKU_INPUT_MANAGER',
+        action,
+        downTimeMs,
+        eventTimeMs: nowMs,
+        rawX,
+        rawY,
+        huWidth,
+        huHeight,
+        dispatchedX: sx,
+        dispatchedY: sy,
+        boundsWidth: 1280,
+        boundsHeight: 720,
+        displayId: virtualDisplayId,
+        blockedAccessibility: true,
+        summary: `SHIZUKU_COCKPIT -> ICarLifeShizukuService.injectTouch(${action}, (${sx},${sy}) @ 1280×720, downTime=${downTimeMs}, eventTime=${nowMs}, displayId=${virtualDisplayId}) [InputManager ASYNC]`,
+      },
+    };
+  }
+
+  if (mode === 'cockpit') {
+    const [scaledX, scaledY] = scaleTouchCoordinates(rawX, rawY, 1280, 720, huWidth, huHeight);
+    const sx = Math.round(scaledX);
+    const sy = Math.round(scaledY);
+    return {
+      nextState,
+      result: {
+        target: 'PRESENTATION_DECOR_VIEW',
+        action,
+        downTimeMs,
+        eventTimeMs: nowMs,
+        rawX,
+        rawY,
+        huWidth,
+        huHeight,
+        dispatchedX: sx,
+        dispatchedY: sy,
+        boundsWidth: 1280,
+        boundsHeight: 720,
+        displayId: virtualDisplayId,
+        blockedAccessibility: true,
+        summary: `COCKPIT -> presentation.window.decorView.dispatchTouchEvent(${action}, (${sx},${sy}) @ 1280×720, downTime=${downTimeMs}) [AccessibilityService OFF]`,
+      },
+    };
+  }
+
+  const [scaledX, scaledY] = scaleTouchCoordinates(
+    rawX,
+    rawY,
+    phoneBounds.width,
+    phoneBounds.height,
+    huWidth,
+    huHeight
+  );
+  const sx = Math.round(scaledX);
+  const sy = Math.round(scaledY);
+  return {
+    nextState,
+    result: {
+      target: 'ACCESSIBILITY_DISPATCH_GESTURE',
+      action,
+      downTimeMs,
+      eventTimeMs: nowMs,
+      rawX,
+      rawY,
+      huWidth,
+      huHeight,
+      dispatchedX: sx,
+      dispatchedY: sy,
+      boundsWidth: phoneBounds.width,
+      boundsHeight: phoneBounds.height,
+      displayId: 0,
+      blockedAccessibility: false,
+      summary: `MIRRORING -> CarLifeAccessibilityService.dispatchGesture(${action}, (${sx},${sy}) @ currentWindowMetrics.bounds ${phoneBounds.width}×${phoneBounds.height})`,
+    },
+  };
+}
+

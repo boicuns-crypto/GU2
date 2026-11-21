@@ -1,28 +1,27 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   CARLIFE_CHANNELS,
-  CarLifeChannelId,
   formatHex16,
 } from '../protocol/carlifeConstants';
 import { HANDSHAKE_TEST_PROFILES } from '../protocol/carlifeControlStateMachine';
+import { ShizukuStatusKind } from '../protocol/shizukuServiceBridge';
 import {
-  APP_LAUNCH_MODE_META,
   APP_MODE_META,
-  AppLaunchMode,
   AppMode,
   BridgeRuntimeState,
+  COCKPIT_INSTALLED_APPS,
   PacketLogEntry,
   SetupChecklistStatus,
-  VIDEO_SOURCE_META,
   VideoSourceMode,
 } from '../store/bridgeStore';
 import {
-  AppsGridIcon,
+  ArrowBackIcon,
   CheckCircleIcon,
   ChevronDownIcon,
   ChevronUpIcon,
   ClearAllIcon,
   GraphicEqIcon,
+  HomeIcon,
   MemoryIcon,
   PlayArrowIcon,
   RefreshIcon,
@@ -38,19 +37,32 @@ interface UnifiedSettingsAndDiagnosticsScreenProps {
   lastDecodedBreakdown: string;
   mediaStream: MediaStream | null;
   onSetAppMode: (mode: AppMode) => void;
+  onRequestShizukuPermission: () => void;
+  onOpenShizukuApp: () => void;
+  onOpenDeveloperSettings: () => void;
+  onToggleShizukuDaemon: () => void;
   onSetLogPacketsInUi: (enabled: boolean) => void;
+  onSetTransmitAudioOverUsb: (enabled: boolean) => void;
   onSetMutePhoneSpeaker: (enabled: boolean) => void;
-  onToggleAudioCapture: () => void;
-  onSetVideoSourceMode: (mode: VideoSourceMode) => void;
-  onSetAppLaunchMode: (mode: AppLaunchMode) => void;
+  onSetAutoStartOnUsbAttach: (enabled: boolean) => void;
+  onSetKeepPhoneScreenOn: (enabled: boolean) => void;
+  onSetForceLandscapeMirroring: (enabled: boolean) => void;
+  onToggleLauncherAppVisibility: (packageName: string) => void;
+  onSetLauncherVisiblePreset: (preset: 'all' | 'auto') => void;
+  onSetShizukuVdNavButtonsEnabled: (enabled: boolean) => void;
+  onSetShizukuVdNavButtonsLayout: (layout: 'dock' | 'floating') => void;
+  onTriggerVdHome: () => void;
+  onTriggerVdBack: () => void;
+  onSetCanvasTestCardEnabled: (enabled: boolean) => void;
   onSetHandshakeProfile: (id: number) => void;
   onSelectResolution: (width: number, height: number) => void;
+  onSelectFps: (fps: 25 | 30) => void;
+  onSelectDensityDpi: (dpi: 160 | 180 | 200) => void;
   onSelectBitrate: (kbps: number) => void;
   onSetVideoHeaderMode: (useAoA20B: boolean) => void;
   onToggleProjection: () => void;
   onStartJettaVs7Vd: () => void;
   onToggleAccessibility: () => void;
-  onToggleOverlay: () => void;
   onRequestMediaProjection: () => void;
   onScanAndAttachUsb: () => void;
   onStopBridge: () => void;
@@ -74,7 +86,6 @@ const CanvasTestCardPreview: React.FC<{ width: number; height: number }> = ({ wi
           ctx.fillStyle = '#0B0E14';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-          // Grid lines
           ctx.strokeStyle = '#1E2636';
           ctx.lineWidth = 1;
           for (let x = 0; x < canvas.width; x += 40) {
@@ -90,12 +101,10 @@ const CanvasTestCardPreview: React.FC<{ width: number; height: number }> = ({ wi
             ctx.stroke();
           }
 
-          // Pulsing scan bar
           const scanX = (frameNum * 5) % canvas.width;
           ctx.fillStyle = 'rgba(0, 180, 216, 0.25)';
           ctx.fillRect(scanX, 0, 16, canvas.height);
 
-          // Header banner
           ctx.fillStyle = '#00B4D8';
           ctx.font = 'bold 20px "Space Grotesk", sans-serif';
           ctx.fillText('JETTA VS7 TEST • H.264 CANVAS', 20, 42);
@@ -103,10 +112,14 @@ const CanvasTestCardPreview: React.FC<{ width: number; height: number }> = ({ wi
           ctx.fillStyle = '#10B981';
           ctx.font = '14px "JetBrains Mono", monospace';
           const nowStr = new Date().toLocaleTimeString([], { hour12: false });
-          ctx.fillText(`TIME: ${nowStr}  |  FRAME #${frameNum}  |  ${width}x${height} @ 30fps`, 20, 74);
+          ctx.fillText(
+            `TIME: ${nowStr}  |  FRAME #${frameNum}  |  ${width}x${height} @ 30fps`,
+            20,
+            74
+          );
 
           ctx.fillStyle = '#F59E0B';
-          ctx.fillText('CHANNEL 0x0002 • AOA 20B (0x00020001) • CBR Baseline', 20, 102);
+          ctx.fillText('CHANNEL 0x0002 • AOA 20B (0x00020001) • VBR Baseline L3 • QP≤36', 20, 102);
         }
       }
       rafId = window.requestAnimationFrame(draw);
@@ -164,26 +177,56 @@ const SelectableOptionButton: React.FC<{
   </button>
 );
 
-const StatusActionChip: React.FC<{
-  label: string;
-  active: boolean;
-  icon: React.ReactNode;
+const ToggleSettingRow: React.FC<{
+  title: string;
+  description: string;
+  checked: boolean;
+  onToggle: (next: boolean) => void;
   testTag: string;
-  onClick: () => void;
-}> = ({ label, active, icon, testTag, onClick }) => (
-  <button
-    type="button"
-    onClick={onClick}
-    data-testid={testTag}
-    className={`flex-1 h-11 rounded-[10px] px-2.5 flex items-center justify-center gap-1.5 text-[12px] font-semibold transition cursor-pointer min-w-0 ${
-      active
-        ? 'bg-[#064E3B] text-[#10B981] hover:brightness-110'
-        : 'bg-[#451A03] text-[#F59E0B] hover:brightness-110'
+  accentColor?: 'cyan' | 'emerald';
+  disabled?: boolean;
+}> = ({
+  title,
+  description,
+  checked,
+  onToggle,
+  testTag,
+  accentColor = 'cyan',
+  disabled = false,
+}) => (
+  <div
+    className={`w-full min-h-[52px] rounded-xl bg-[#0B0E14] border border-[#222938] px-3 py-2.5 flex items-center justify-between gap-3 ${
+      disabled ? 'opacity-55' : ''
     }`}
   >
-    <span className="shrink-0">{icon}</span>
-    <span className="truncate">{label}</span>
-  </button>
+    <div className="flex-1 min-w-0">
+      <div className="text-[13px] font-medium text-[#F1F5F9]">{title}</div>
+      <div className="text-[11px] text-[#94A3B8] mt-0.5 leading-snug">{description}</div>
+    </div>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onToggle(!checked)}
+      data-testid={testTag}
+      className={`w-11 h-6 rounded-full p-0.5 transition-colors shrink-0 ${
+        disabled ? 'cursor-not-allowed' : 'cursor-pointer'
+      } ${
+        checked
+          ? accentColor === 'emerald'
+            ? 'bg-[#10B981]'
+            : 'bg-[#00B4D8]'
+          : 'bg-[#1E2636]'
+      }`}
+    >
+      <span
+        className={`block w-5 h-5 rounded-full transition-transform ${
+          checked ? 'translate-x-5 bg-[#0B0E14]' : 'translate-x-0 bg-[#94A3B8]'
+        }`}
+      />
+    </button>
+  </div>
 );
 
 const MetricPill: React.FC<{ label: string; value: string; subValue: string }> = ({
@@ -248,19 +291,32 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
   lastDecodedBreakdown,
   mediaStream,
   onSetAppMode,
+  onRequestShizukuPermission,
+  onOpenShizukuApp,
+  onOpenDeveloperSettings,
+  onToggleShizukuDaemon,
   onSetLogPacketsInUi,
+  onSetTransmitAudioOverUsb,
   onSetMutePhoneSpeaker,
-  onToggleAudioCapture,
-  onSetVideoSourceMode,
-  onSetAppLaunchMode,
+  onSetAutoStartOnUsbAttach,
+  onSetKeepPhoneScreenOn,
+  onSetForceLandscapeMirroring,
+  onToggleLauncherAppVisibility,
+  onSetLauncherVisiblePreset,
+  onSetShizukuVdNavButtonsEnabled,
+  onSetShizukuVdNavButtonsLayout,
+  onTriggerVdHome,
+  onTriggerVdBack,
+  onSetCanvasTestCardEnabled,
   onSetHandshakeProfile,
   onSelectResolution,
+  onSelectFps,
+  onSelectDensityDpi,
   onSelectBitrate,
   onSetVideoHeaderMode,
   onToggleProjection,
   onStartJettaVs7Vd,
   onToggleAccessibility,
-  onToggleOverlay,
   onRequestMediaProjection,
   onScanAndAttachUsb,
   onStopBridge,
@@ -269,479 +325,68 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
   onClearLogs,
 }) => {
   const [diagnosticsExpanded, setDiagnosticsExpanded] = useState(false);
+  const [shizukuGuideExpanded, setShizukuGuideExpanded] = useState(false);
   const [selectedLogTab, setSelectedLogTab] = useState<0 | 1>(0);
 
   const sourceMode = state.videoSourceMode;
   const proj = state.projectionStats;
   const audioStats = state.audioCaptureStats;
+  const shizuku = state.shizukuState;
+  const isCanvasTestCard = sourceMode === VideoSourceMode.CANVAS_TEST_CARD;
 
-  const vdStatusLine = (() => {
-    if (proj.isRunning && !lastLaunchStatus.startsWith('Запущено:')) {
-      if (sourceMode === VideoSourceMode.SCREEN_MIRRORING) {
-        return proj.usingMediaProjection
-          ? `Зеркалирование экрана активно (${state.configuredWidth}×${state.configuredHeight} @ ${state.configuredBitrateBps / 1000} кбит/с, 30 fps, без Presentation)`
-          : 'Ожидание разрешения MediaProjection («Весь экран») — нажмите кнопку «Начать трансляцию»';
-      }
-      if (sourceMode === VideoSourceMode.CANVAS_TEST_CARD) {
-        return `Тест-карта (Canvas) активна на Surface (${state.configuredWidth}×${state.configuredHeight} @ ${state.configuredBitrateBps / 1000} кбит/с, 30 fps)`;
-      }
-      return `Лаунчер ГУ активен на VD #${proj.virtualDisplayId} (${state.configuredWidth}×${state.configuredHeight} @ ${state.configuredBitrateBps / 1000} кбит/с)`;
-    }
-    if (!proj.isRunning) {
-      return `Готов к трансляции: выбрано разрешение ${state.configuredWidth}×${state.configuredHeight} @ ${state.configuredBitrateBps / 1000} кбит/с`;
-    }
-    return lastLaunchStatus;
-  })();
+  const shizukuBadgeStyle =
+    shizuku.statusKind === ShizukuStatusKind.RUNNING_GRANTED
+      ? 'bg-[#064E3B] text-[#10B981] border-[#10B981]/50'
+      : shizuku.statusKind === ShizukuStatusKind.NO_PERMISSION
+      ? 'bg-[#451A03] text-[#F59E0B] border-[#F59E0B]/50'
+      : 'bg-[#450A0A] text-[#EF4444] border-[#EF4444]/50';
 
+  const visiblePkgSet = new Set(state.launcherVisiblePackages);
   const displayedLogs =
     selectedLogTab === 0 ? state.commandPacketLogs : state.videoPacketLogs;
 
   return (
     <div className="h-full w-full overflow-y-auto px-4 py-4">
-      <div className="max-w-[680px] mx-auto flex flex-col gap-3.5 pb-6">
-        {/* 0. App Mode Switcher */}
-        <div
+      <div className="max-w-[680px] mx-auto flex flex-col gap-4 pb-6">
+        {/* 1. Блок «Режим работы» (всегда сверху) */}
+        <section
           data-testid="app_mode_switcher_card"
           className="w-full rounded-2xl bg-[#151A24] border border-[#00B4D8]/75 p-4 flex flex-col gap-2.5"
         >
           <div className="flex items-center justify-between gap-2">
             <div className="flex-1 min-w-0">
-              <h3 className="text-[16px] font-semibold text-[#F1F5F9]">Режим работы приложения</h3>
+              <h2 className="text-[16px] font-semibold text-[#F1F5F9]">Режим работы</h2>
               <p className="text-[11px] text-[#94A3B8] mt-0.5">
-                Независимые видеопоток и маршрутизация тача (0x0006)
+                Выберите сценарий вывода изображения и обработки касаний на ГУ
               </p>
             </div>
             <span className="shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-semibold bg-[#00B4D8]/16 border border-[#00B4D8]/65 text-[#00B4D8] whitespace-nowrap">
-              {state.appMode === AppMode.COCKPIT ? 'КОКПИТ VD' : 'ЗЕРКАЛО'}
+              {state.appMode === AppMode.COCKPIT
+                ? 'КОКПИТ'
+                : state.appMode === AppMode.SHIZUKU_COCKPIT
+                ? 'SHIZUKU'
+                : 'ЗЕРКАЛО'}
             </span>
           </div>
 
-          {[AppMode.COCKPIT, AppMode.MIRRORING].map((mode) => {
-            const meta = APP_MODE_META[mode];
-            const isSelected = state.appMode === mode;
-            const tag =
-              mode === AppMode.COCKPIT ? 'app_mode_cockpit_btn' : 'app_mode_mirroring_btn';
-            return (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => onSetAppMode(mode)}
-                data-testid={tag}
-                className={`w-full min-h-[48px] rounded-xl px-3 py-2.5 border flex items-center gap-2.5 text-left transition cursor-pointer ${
-                  isSelected
-                    ? 'bg-[#00B4D8]/12 border-[#00B4D8]'
-                    : 'bg-[#0B0E14] border-[#222938] hover:border-[#00B4D8]/40'
-                }`}
-              >
-                <span
-                  className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${
-                    isSelected ? 'border-[#00B4D8]' : 'border-[#64748B]'
-                  }`}
-                >
-                  {isSelected && <span className="w-2 h-2 rounded-full bg-[#00B4D8]" />}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div
-                    className={`text-[13px] ${
-                      isSelected ? 'font-semibold text-[#00B4D8]' : 'font-medium text-[#F1F5F9]'
-                    }`}
-                  >
-                    {meta.title}
-                  </div>
-                  <div className="text-[11px] text-[#94A3B8] mt-0.5 leading-snug">
-                    {meta.subtitle}
-                  </div>
-                </div>
-              </button>
-            );
-          })}
-
-          {/* Switch: Log Packets in UI */}
-          <div className="w-full min-h-[48px] rounded-xl bg-[#0B0E14] border border-[#222938] px-3 py-2 flex items-center justify-between gap-3">
-            <div className="flex-1 min-w-0">
-              <div className="text-[13px] font-medium text-[#F1F5F9]">Логировать пакеты в UI</div>
-              <div className="text-[11px] text-[#94A3B8] mt-0.5">
-                {state.logPacketsInUi
-                  ? 'Вкл — пакеты 0x0001/0x0002 пишутся в журнал (может нагружать UI)'
-                  : 'Выкл — ноль лишних перерисовок UI при 30 fps и аудио PCM'}
-              </div>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={state.logPacketsInUi}
-              onClick={() => onSetLogPacketsInUi(!state.logPacketsInUi)}
-              data-testid="log_packets_ui_switch"
-              className={`w-11 h-6 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
-                state.logPacketsInUi ? 'bg-[#00B4D8]' : 'bg-[#1E2636]'
-              }`}
-            >
-              <span
-                className={`block w-5 h-5 rounded-full transition-transform ${
-                  state.logPacketsInUi
-                    ? 'translate-x-5 bg-[#0B0E14]'
-                    : 'translate-x-0 bg-[#94A3B8]'
-                }`}
-              />
-            </button>
-          </div>
-        </div>
-
-        {/* 1. Virtual Display & Status Card */}
-        <div className="w-full rounded-2xl bg-[#151A24] border border-[#222938] p-4 flex flex-col gap-3">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-[16px] font-semibold text-[#F1F5F9] flex-1">
-              {sourceMode === VideoSourceMode.SCREEN_MIRRORING
-                ? 'Зеркалирование экрана (MediaProjection)'
-                : sourceMode === VideoSourceMode.VIRTUAL_DISPLAY
-                ? 'Виртуальный экран ГУ (VirtualDisplay)'
-                : 'Источник H.264: Тест-карта (Canvas)'}
-            </h3>
-            <span
-              className={`shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-semibold whitespace-nowrap ${
-                proj.isRunning
-                  ? 'bg-[#064E3B] text-[#10B981]'
-                  : 'bg-[#1E2636] text-[#94A3B8]'
-              }`}
-            >
-              {proj.isRunning && sourceMode === VideoSourceMode.SCREEN_MIRRORING
-                ? proj.usingMediaProjection
-                  ? 'MIRROR ON'
-                  : 'ЖДЁТ MP'
-                : proj.isRunning && sourceMode === VideoSourceMode.CANVAS_TEST_CARD
-                ? 'CANVAS 30FPS'
-                : proj.isRunning
-                ? `VD #${proj.virtualDisplayId} АКТИВЕН`
-                : sourceMode === VideoSourceMode.SCREEN_MIRRORING
-                ? 'MIRROR ВЫКЛ'
-                : sourceMode === VideoSourceMode.CANVAS_TEST_CARD
-                ? 'CANVAS ВЫКЛ'
-                : 'VD ВЫКЛ'}
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <StatusActionChip
-              label={
-                proj.isRunning && sourceMode === VideoSourceMode.SCREEN_MIRRORING
-                  ? 'Mirror ON'
-                  : sourceMode === VideoSourceMode.SCREEN_MIRRORING
-                  ? 'Start Mirror'
-                  : proj.isRunning && sourceMode === VideoSourceMode.CANVAS_TEST_CARD
-                  ? 'Canvas ON'
-                  : sourceMode === VideoSourceMode.CANVAS_TEST_CARD
-                  ? 'Start Canvas'
-                  : proj.isRunning
-                  ? 'VD ON'
-                  : 'Start VD'
-              }
-              active={proj.isRunning}
-              icon={<VideocamIcon className="w-4 h-4" />}
-              testTag="quick_toggle_vd_btn"
-              onClick={onToggleProjection}
-            />
-            <StatusActionChip
-              label={checklistStatus.step3AccessibilityEnabled ? 'Тач: Вкл' : 'Тач: Выкл'}
-              active={checklistStatus.step3AccessibilityEnabled}
-              icon={<TouchAppIcon className="w-4 h-4" />}
-              testTag="quick_a11y_settings_btn"
-              onClick={onToggleAccessibility}
-            />
-            <StatusActionChip
-              label={checklistStatus.step2OverlayGranted ? 'Overlay OK' : 'Overlay'}
-              active={checklistStatus.step2OverlayGranted}
-              icon={<AppsGridIcon className="w-4 h-4" />}
-              testTag="quick_overlay_settings_btn"
-              onClick={onToggleOverlay}
-            />
-          </div>
-
-          <div className="rounded-[10px] bg-[#0B0E14] border border-[#222938] px-3 py-2">
-            <p
-              className={`text-[12px] font-medium ${
-                proj.isRunning ? 'text-[#10B981]' : 'text-[#94A3B8]'
-              }`}
-            >
-              {vdStatusLine}
-            </p>
-          </div>
-
-          {proj.isRunning && sourceMode === VideoSourceMode.CANVAS_TEST_CARD && (
-            <CanvasTestCardPreview width={state.configuredWidth} height={state.configuredHeight} />
-          )}
-
-          {proj.isRunning && mediaStream && sourceMode !== VideoSourceMode.CANVAS_TEST_CARD && (
-            <MediaStreamPreview stream={mediaStream} />
-          )}
-        </div>
-
-        {/* 1.15 USB AOA Audio Channel 0x0003 */}
-        <div
-          data-testid="usb_audio_0x0003_card"
-          className={`w-full rounded-2xl bg-[#151A24] border p-4 flex flex-col gap-2.5 ${
-            audioStats.isCapturing ? 'border-[#10B981]/70' : 'border-[#222938]'
-          }`}
-        >
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex-1 min-w-0">
-              <h3 className="text-[16px] font-semibold text-[#F1F5F9]">
-                Звук по USB AOA (канал 0x0003)
-              </h3>
-              <p className="text-[11px] text-[#94A3B8] mt-0.5">
-                48 кГц Stereo 16-bit PCM (4096B) • Звонки HFP на Bluetooth авто
-              </p>
-            </div>
-            <span
-              className={`shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-semibold whitespace-nowrap ${
-                audioStats.isCapturing
-                  ? 'bg-[#064E3B] text-[#10B981]'
-                  : !checklistStatus.step5MediaProjectionGranted
-                  ? 'bg-[#451A03] text-[#F59E0B]'
-                  : 'bg-[#1E2636] text-[#94A3B8]'
-              }`}
-            >
-              {audioStats.isCapturing
-                ? 'PCM 48КГЦ ON'
-                : !checklistStatus.step5MediaProjectionGranted
-                ? 'НЕТ ЭКРАНА'
-                : 'ГОТОВ 0x0003'}
-            </span>
-          </div>
-
-          <p className="text-[12px] text-[#94A3B8] leading-relaxed">
-            Системный звук (Я.Музыка, Навигатор, 2ГИС, YouTube) захватывается через AudioPlaybackCapture и передаётся в канал 0x0003 (AOA 20B). Паузы тишины пропускаются.
-          </p>
-
-          <div className="rounded-[10px] bg-[#0B0E14] border border-[#222938] px-3 py-2 flex flex-col gap-0.5">
-            <div
-              className={`text-[12px] font-medium ${
-                audioStats.isCapturing ? 'text-[#10B981]' : 'text-[#94A3B8]'
-              }`}
-            >
-              {audioStats.statusMessage}
-            </div>
-            <div className="text-[11px] text-[#64748B]">
-              INIT: {audioStats.sentInitPackets} • PCM: {audioStats.sentPcmPackets} пак. (
-              {Math.floor(audioStats.sentPcmBytes / 1024)} КБ) • Тишина пропущена:{' '}
-              {audioStats.skippedSilentPackets}
-            </div>
-          </div>
-
-          <div className="w-full min-h-[48px] rounded-xl bg-[#0B0E14] border border-[#222938] px-3 py-2 flex items-center justify-between gap-3">
-            <div className="flex-1 min-w-0">
-              <div className="text-[13px] font-medium text-[#F1F5F9]">
-                Глушить динамик телефона при USB-звуке
-              </div>
-              <div
-                className={`text-[11px] mt-0.5 ${
-                  audioStats.isPhoneSpeakerMutedByBridge ? 'text-[#10B981]' : 'text-[#94A3B8]'
-                }`}
-              >
-                {audioStats.isPhoneSpeakerMutedByBridge
-                  ? `Динамик телефона заглушен (сохранена громкость: ${audioStats.savedPhoneMusicVolume ?? 0}); восстановится при отключении USB`
-                  : 'При старте захвата 0x0003 сохраняет STREAM_MUSIC, ставит 0 и возвращает при остановке/отключении USB'}
-              </div>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={state.mutePhoneSpeakerDuringUsbAudio}
-              onClick={() => onSetMutePhoneSpeaker(!state.mutePhoneSpeakerDuringUsbAudio)}
-              data-testid="mute_speaker_usb_audio_switch"
-              className={`w-11 h-6 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
-                state.mutePhoneSpeakerDuringUsbAudio ? 'bg-[#10B981]' : 'bg-[#1E2636]'
-              }`}
-            >
-              <span
-                className={`block w-5 h-5 rounded-full transition-transform ${
-                  state.mutePhoneSpeakerDuringUsbAudio
-                    ? 'translate-x-5 bg-[#0B0E14]'
-                    : 'translate-x-0 bg-[#94A3B8]'
-                }`}
-              />
-            </button>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              if (!checklistStatus.step5MediaProjectionGranted) {
-                onRequestMediaProjection();
-              } else {
-                onToggleAudioCapture();
-              }
-            }}
-            data-testid="audio_0x0003_action_btn"
-            className={`w-full min-h-[48px] rounded-[10px] px-4 font-semibold text-[13px] transition cursor-pointer ${
-              audioStats.isCapturing
-                ? 'bg-[#1E2636] text-[#F1F5F9] border border-[#222938]'
-                : 'bg-[#00B4D8] text-[#001D24] hover:brightness-110'
-            }`}
-          >
-            {!checklistStatus.step5MediaProjectionGranted
-              ? 'Выдать MediaProjection («Весь экран»)'
-              : audioStats.isCapturing
-              ? 'Остановить звук 0x0003 (MSG_MEDIA_STOP)'
-              : 'Запустить захват звука 0x0003'}
-          </button>
-        </div>
-
-        {/* 1.20 Accessibility Touch Service */}
-        <div
-          data-testid="accessibility_touch_service_card"
-          className={`w-full rounded-2xl bg-[#151A24] border p-4 flex flex-col gap-2.5 ${
-            checklistStatus.step3AccessibilityEnabled
-              ? 'border-[#10B981]/70'
-              : 'border-[#F59E0B]/70'
-          }`}
-        >
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex-1 min-w-0">
-              <h3 className="text-[16px] font-semibold text-[#F1F5F9]">
-                Служба тача (Спец. возможности)
-              </h3>
-              <p className="text-[11px] text-[#94A3B8] mt-0.5">
-                CarLifeAccessibilityService • Тапы, свайпы карт и Назад/Домой (канал 0x0006)
-              </p>
-            </div>
-            <span
-              className={`shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-semibold ${
-                checklistStatus.step3AccessibilityEnabled
-                  ? 'bg-[#064E3B] text-[#10B981]'
-                  : 'bg-[#451A03] text-[#F59E0B]'
-              }`}
-            >
-              {checklistStatus.step3AccessibilityEnabled ? 'Вкл' : 'Выкл'}
-            </span>
-          </div>
-
-          <p className="text-[12px] text-[#94A3B8] leading-relaxed">
-            Переводит касания с экрана ГУ (1280×720) в реальные координаты смартфона с учётом ориентации и выполняет тапы (50 мс) и свайпы карт в любых приложениях (2ГИС, Яндекс.Навигатор, YouTube).
-          </p>
-
-          <button
-            type="button"
-            onClick={onToggleAccessibility}
-            data-testid="enable_accessibility_touch_btn"
-            className={`w-full min-h-[48px] rounded-[10px] px-4 flex items-center justify-center gap-2 font-semibold text-[13px] transition cursor-pointer ${
-              checklistStatus.step3AccessibilityEnabled
-                ? 'bg-[#1E2636] text-[#F1F5F9] border border-[#222938]'
-                : 'bg-[#00B4D8] text-[#001D24] hover:brightness-110'
-            }`}
-          >
-            <TouchAppIcon className="w-[18px] h-[18px]" />
-            <span>
-              {checklistStatus.step3AccessibilityEnabled
-                ? 'Служба тача активна (Настройки)'
-                : 'Включить службу тача (Спец. возможности)'}
-            </span>
-          </button>
-        </div>
-
-        {/* 1.25 Video Source Switcher */}
-        <div
-          data-testid="video_source_card"
-          className="w-full rounded-2xl bg-[#151A24] border border-[#10B981]/70 p-4 flex flex-col gap-2.5"
-        >
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex-1 min-w-0">
-              <h3 className="text-[16px] font-semibold text-[#F1F5F9]">Источник видео</h3>
-              <p className="text-[11px] text-[#94A3B8] mt-0.5">
-                Выбор входа для H.264 MediaCodec (1280×720@30fps, 2000 kbps, AOA 20B)
-              </p>
-            </div>
-            <span className="shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-semibold bg-[#10B981]/16 border border-[#10B981]/65 text-[#10B981] whitespace-nowrap">
-              {sourceMode === VideoSourceMode.SCREEN_MIRRORING
-                ? 'MIRROR'
-                : sourceMode === VideoSourceMode.VIRTUAL_DISPLAY
-                ? 'VD'
-                : 'CANVAS'}
-            </span>
-          </div>
-
-          {[
-            VideoSourceMode.SCREEN_MIRRORING,
-            VideoSourceMode.VIRTUAL_DISPLAY,
-            VideoSourceMode.CANVAS_TEST_CARD,
-          ].map((mode) => {
-            const meta = VIDEO_SOURCE_META[mode];
-            const isSelected = sourceMode === mode;
-            const tag =
-              mode === VideoSourceMode.SCREEN_MIRRORING
-                ? 'video_source_mirror_btn'
-                : mode === VideoSourceMode.VIRTUAL_DISPLAY
-                ? 'video_source_vd_btn'
-                : 'video_source_canvas_btn';
-            return (
-              <button
-                key={mode}
-                type="button"
-                onClick={() => onSetVideoSourceMode(mode)}
-                data-testid={tag}
-                className={`w-full min-h-[48px] rounded-xl px-3 py-2.5 border flex items-center gap-2.5 text-left transition cursor-pointer ${
-                  isSelected
-                    ? 'bg-[#10B981]/12 border-[#10B981]'
-                    : 'bg-[#0B0E14] border-[#222938] hover:border-[#10B981]/40'
-                }`}
-              >
-                <span
-                  className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${
-                    isSelected ? 'border-[#10B981]' : 'border-[#64748B]'
-                  }`}
-                >
-                  {isSelected && <span className="w-2 h-2 rounded-full bg-[#10B981]" />}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div
-                    className={`text-[13px] ${
-                      isSelected ? 'font-semibold text-[#10B981]' : 'font-medium text-[#F1F5F9]'
-                    }`}
-                  >
-                    {meta.title}
-                  </div>
-                  <div className="text-[11px] text-[#94A3B8] mt-0.5 leading-snug">
-                    {meta.subtitle}
-                  </div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-
-        {/* 1.35 App Launch Mode */}
-        <div
-          data-testid="app_launch_mode_card"
-          className="w-full rounded-2xl bg-[#151A24] border border-[#00B4D8]/70 p-4 flex flex-col gap-2.5"
-        >
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex-1 min-w-0">
-              <h3 className="text-[16px] font-semibold text-[#F1F5F9]">Режим запуска приложений</h3>
-              <p className="text-[11px] text-[#94A3B8] mt-0.5">
-                При SecurityException на VD выполняется мгновенный запасной запуск без ActivityOptions
-              </p>
-            </div>
-            <span className="shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-semibold bg-[#00B4D8]/16 border border-[#00B4D8]/65 text-[#00B4D8] whitespace-nowrap">
-              {state.appLaunchMode === AppLaunchMode.VIRTUAL_DISPLAY_IF_AVAILABLE
-                ? 'VD'
-                : 'MIRROR'}
-            </span>
-          </div>
-
-          {[AppLaunchMode.VIRTUAL_DISPLAY_IF_AVAILABLE, AppLaunchMode.SCREEN_MIRRORING].map(
-            (mode) => {
-              const meta = APP_LAUNCH_MODE_META[mode];
-              const isSelected = state.appLaunchMode === mode;
+          <div className="flex flex-col gap-2">
+            {[AppMode.COCKPIT, AppMode.MIRRORING, AppMode.SHIZUKU_COCKPIT].map((mode) => {
+              const meta = APP_MODE_META[mode];
+              const isSelected = state.appMode === mode;
               const tag =
-                mode === AppLaunchMode.VIRTUAL_DISPLAY_IF_AVAILABLE
-                  ? 'launch_mode_vd_btn'
-                  : 'launch_mode_mirror_btn';
+                mode === AppMode.COCKPIT
+                  ? 'app_mode_cockpit_btn'
+                  : mode === AppMode.MIRRORING
+                  ? 'app_mode_mirroring_btn'
+                  : 'app_mode_shizuku_cockpit_btn';
+
               return (
                 <button
                   key={mode}
                   type="button"
-                  onClick={() => onSetAppLaunchMode(mode)}
+                  onClick={() => onSetAppMode(mode)}
                   data-testid={tag}
-                  className={`w-full min-h-[48px] rounded-xl px-3 py-2.5 border flex items-center gap-2.5 text-left transition cursor-pointer ${
+                  className={`w-full min-h-[52px] rounded-xl px-3.5 py-2.5 border flex items-center gap-3 text-left transition cursor-pointer ${
                     isSelected
                       ? 'bg-[#00B4D8]/12 border-[#00B4D8]'
                       : 'bg-[#0B0E14] border-[#222938] hover:border-[#00B4D8]/40'
@@ -755,12 +400,21 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
                     {isSelected && <span className="w-2 h-2 rounded-full bg-[#00B4D8]" />}
                   </span>
                   <div className="flex-1 min-w-0">
-                    <div
-                      className={`text-[13px] ${
-                        isSelected ? 'font-semibold text-[#00B4D8]' : 'font-medium text-[#F1F5F9]'
-                      }`}
-                    >
-                      {meta.title}
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={`text-[14px] ${
+                          isSelected ? 'font-semibold text-[#00B4D8]' : 'font-medium text-[#F1F5F9]'
+                        }`}
+                      >
+                        {meta.title}
+                      </span>
+                      {mode === AppMode.SHIZUKU_COCKPIT && (
+                        <span
+                          className={`shrink-0 rounded-md px-2 py-0.5 text-[10px] font-semibold border ${shizukuBadgeStyle}`}
+                        >
+                          {shizuku.statusLabel}
+                        </span>
+                      )}
                     </div>
                     <div className="text-[11px] text-[#94A3B8] mt-0.5 leading-snug">
                       {meta.subtitle}
@@ -768,184 +422,725 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
                   </div>
                 </button>
               );
-            }
-          )}
-        </div>
+            })}
+          </div>
+        </section>
 
-        {/* 1.5 Handshake Lab 0x0001 */}
-        <div
-          data-testid="handshake_lab_card"
-          className="w-full rounded-2xl bg-[#151A24] border border-[#00B4D8]/70 p-4 flex flex-col gap-2.5"
+        {/* 2. Контекстный блок «Настройки выбранного режима» */}
+        <section
+          data-testid="active_mode_settings_card"
+          className="w-full rounded-2xl bg-[#151A24] border border-[#222938] p-4 flex flex-col gap-3.5"
         >
           <div className="flex items-center justify-between gap-2">
             <div className="flex-1 min-w-0">
-              <h3 className="text-[16px] font-semibold text-[#F1F5F9]">Тест рукопожатия 0x0001</h3>
-              <p className="text-[11px] text-[#94A3B8] mt-0.5">
-                Режим ответа на MSG_CMD_HU_PROTOCOL_VERSION (0x00018001) от ГУ Jetta VS7
+              <h2 className="text-[16px] font-semibold text-[#F1F5F9]">
+                Настройки выбранного режима
+              </h2>
+              <p className="text-[11px] text-[#00B4D8] mt-0.5 font-medium">
+                {APP_MODE_META[state.appMode].title} — {APP_MODE_META[state.appMode].subtitle}
               </p>
             </div>
-            <span className="shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-semibold bg-[#00B4D8]/16 border border-[#00B4D8]/65 text-[#00B4D8] whitespace-nowrap">
-              ТЕСТ {state.handshakeTestProfileId}/4
+            <span className="shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-medium bg-[#1E2636] border border-[#222938] text-[#94A3B8] whitespace-nowrap">
+              {state.configuredWidth}×{state.configuredHeight} • {state.virtualDisplayDensityDpi} dpi
             </span>
           </div>
 
-          {HANDSHAKE_TEST_PROFILES.map((profile) => {
-            const isSelected = state.handshakeTestProfileId === profile.id;
-            return (
-              <button
-                key={profile.id}
-                type="button"
-                onClick={() => onSetHandshakeProfile(profile.id)}
-                data-testid={`handshake_profile_${profile.id}_btn`}
-                className={`w-full min-h-[48px] rounded-xl px-3 py-2.5 border flex items-center gap-2.5 text-left transition cursor-pointer ${
-                  isSelected
-                    ? 'bg-[#00B4D8]/12 border-[#00B4D8]'
-                    : 'bg-[#0B0E14] border-[#222938] hover:border-[#00B4D8]/40'
-                }`}
+          {/* Ветка 1: «Кокпит» */}
+          {state.appMode === AppMode.COCKPIT && (
+            <div data-testid="cockpit_mode_settings" className="flex flex-col gap-3.5">
+              {/* Разрешение и DPI виртуального экрана */}
+              <div className="rounded-xl bg-[#0B0E14] border border-[#222938] p-3 flex flex-col gap-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[13px] font-semibold text-[#F1F5F9]">
+                    Виртуальный экран (Presentation)
+                  </span>
+                  <span className="text-[11px] font-medium text-[#10B981]">
+                    VD #{proj.virtualDisplayId || 2} • {state.configuredWidth}×{state.configuredHeight} •{' '}
+                    {state.virtualDisplayDensityDpi} dpi
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#94A3B8]">
+                  Разрешение и плотность DPI виртуального экрана (по умолчанию 1280×720, 160 dpi)
+                </p>
+                <div className="grid grid-cols-3 gap-2">
+                  <SelectableOptionButton
+                    label="800 × 480"
+                    selected={state.configuredWidth === 800}
+                    testTag="res_480p_btn"
+                    onClick={() => onSelectResolution(800, 480)}
+                  />
+                  <SelectableOptionButton
+                    label="1024 × 600"
+                    selected={state.configuredWidth === 1024}
+                    testTag="res_600p_btn"
+                    onClick={() => onSelectResolution(1024, 600)}
+                  />
+                  <SelectableOptionButton
+                    label="1280 × 720"
+                    selected={state.configuredWidth === 1280}
+                    testTag="res_720p_btn"
+                    onClick={() => onSelectResolution(1280, 720)}
+                  />
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <SelectableOptionButton
+                    label="160 dpi"
+                    selected={state.virtualDisplayDensityDpi === 160}
+                    testTag="dpi_160_btn"
+                    onClick={() => onSelectDensityDpi(160)}
+                  />
+                  <SelectableOptionButton
+                    label="180 dpi"
+                    selected={state.virtualDisplayDensityDpi === 180}
+                    testTag="dpi_180_btn"
+                    onClick={() => onSelectDensityDpi(180)}
+                  />
+                  <SelectableOptionButton
+                    label="200 dpi"
+                    selected={state.virtualDisplayDensityDpi === 200}
+                    testTag="dpi_200_btn"
+                    onClick={() => onSelectDensityDpi(200)}
+                  />
+                </div>
+              </div>
+
+              {/* Настройка сетки приложений (выбор иконок для лаунчера) */}
+              <div
+                data-testid="launcher_grid_config_block"
+                className="rounded-xl bg-[#0B0E14] border border-[#222938] p-3 flex flex-col gap-2.5"
               >
-                <span
-                  className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${
-                    isSelected ? 'border-[#00B4D8]' : 'border-[#64748B]'
-                  }`}
-                >
-                  {isSelected && <span className="w-2 h-2 rounded-full bg-[#00B4D8]" />}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <div
-                    className={`text-[13px] ${
-                      isSelected ? 'font-semibold text-[#00B4D8]' : 'font-medium text-[#F1F5F9]'
-                    }`}
-                  >
-                    {profile.shortTitle}
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div>
+                    <div className="text-[13px] font-semibold text-[#F1F5F9]">
+                      Сетка приложений лаунчера
+                    </div>
+                    <div className="text-[11px] text-[#94A3B8]">
+                      Показано иконок: {state.launcherVisiblePackages.length} из{' '}
+                      {COCKPIT_INSTALLED_APPS.length}
+                    </div>
                   </div>
-                  <div className="text-[11px] text-[#94A3B8] mt-0.5 leading-snug">
-                    {profile.description}
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => onSetLauncherVisiblePreset('all')}
+                      data-testid="launcher_preset_all_btn"
+                      className="px-2.5 py-1 rounded-lg bg-[#1E2636] border border-[#222938] hover:border-[#00B4D8]/60 text-[11px] font-medium text-[#F1F5F9] cursor-pointer"
+                    >
+                      Все
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onSetLauncherVisiblePreset('auto')}
+                      data-testid="launcher_preset_auto_btn"
+                      className="px-2.5 py-1 rounded-lg bg-[#1E2636] border border-[#222938] hover:border-[#00B4D8]/60 text-[11px] font-medium text-[#00B4D8] cursor-pointer"
+                    >
+                      Только авто
+                    </button>
                   </div>
                 </div>
-              </button>
-            );
-          })}
-        </div>
 
-        {/* 2. Video H.264 Stream Parameters */}
-        <div className="w-full rounded-2xl bg-[#151A24] border border-[#222938] p-4 flex flex-col gap-3">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-[16px] font-semibold text-[#F1F5F9] flex-1">
-              Параметры видеопотока H.264
-            </h3>
-            <span className="shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-medium bg-[#1E2636] border border-[#222938] text-[#00B4D8] whitespace-nowrap">
-              Baseline CBR • 30fps • I=1s
-            </span>
-          </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                  {COCKPIT_INSTALLED_APPS.map((app) => {
+                    const checked = visiblePkgSet.has(app.packageName);
+                    return (
+                      <button
+                        key={app.packageName}
+                        type="button"
+                        onClick={() => onToggleLauncherAppVisibility(app.packageName)}
+                        data-testid={`launcher_app_toggle_${app.packageName}`}
+                        className={`min-h-[38px] rounded-lg px-2.5 py-1.5 border flex items-center gap-2 text-left transition cursor-pointer ${
+                          checked
+                            ? 'bg-[#00B4D8]/12 border-[#00B4D8]/70 text-[#F1F5F9]'
+                            : 'bg-[#151A24] border-[#222938] text-[#64748B]'
+                        }`}
+                      >
+                        <span
+                          className="w-6 h-6 rounded-md flex items-center justify-center text-[9px] font-bold shrink-0"
+                          style={{
+                            backgroundColor: checked ? `${app.accentColor}28` : '#1E2636',
+                            color: checked ? app.accentColor : '#64748B',
+                          }}
+                        >
+                          {app.badgeText}
+                        </span>
+                        <span className="text-[11px] font-medium truncate flex-1">{app.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
-          <p className="text-[12px] text-[#94A3B8]">
-            Разрешение виртуального дисплея, Presentation и кодека (1280×720 • 160 dpi по умолчанию)
-          </p>
+              {/* Быстрая проверка тача в Presentation */}
+              <div
+                data-testid="presentation_touch_test_block"
+                className="rounded-xl bg-[#0B0E14] border border-[#222938] p-3 flex flex-col gap-2"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[13px] font-semibold text-[#F1F5F9]">
+                    Быстрая проверка тача в Presentation
+                  </span>
+                  <span className="text-[11px] text-[#00B4D8] font-mono-jetbrains">
+                    decorView • #{proj.injectedTouches}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onInjectTouch(120, 180)}
+                    data-testid="inject_touch_dock_btn"
+                    className="h-11 rounded-[10px] bg-[#1E2636] border border-[#222938] hover:border-[#00B4D8] text-[#F1F5F9] text-[12px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition"
+                  >
+                    <TouchAppIcon className="w-4 h-4 text-[#00B4D8]" />
+                    <span>Тест Док</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onInjectTouch(680, 360)}
+                    data-testid="inject_touch_launcher_btn"
+                    className="h-11 rounded-[10px] bg-[#1E2636] border border-[#222938] hover:border-[#00B4D8] text-[#F1F5F9] text-[12px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition"
+                  >
+                    <TouchAppIcon className="w-4 h-4 text-[#10B981]" />
+                    <span>Тест Сетка</span>
+                  </button>
+                </div>
+                <div className="text-[11px] font-mono-jetbrains text-[#94A3B8] truncate">
+                  {state.lastTouchOrKeyEvent}
+                </div>
+              </div>
+            </div>
+          )}
 
-          <div className="grid grid-cols-3 gap-2">
-            <SelectableOptionButton
-              label="800 × 480"
-              selected={state.configuredWidth === 800}
-              testTag="res_480p_btn"
-              onClick={() => onSelectResolution(800, 480)}
-            />
-            <SelectableOptionButton
-              label="1024 × 600"
-              selected={state.configuredWidth === 1024}
-              testTag="res_600p_btn"
-              onClick={() => onSelectResolution(1024, 600)}
-            />
-            <SelectableOptionButton
-              label="1280 × 720"
-              selected={state.configuredWidth === 1280}
-              testTag="res_720p_btn"
-              onClick={() => onSelectResolution(1280, 720)}
-            />
-          </div>
+          {/* Ветка 2: «Зеркалирование» */}
+          {state.appMode === AppMode.MIRRORING && (
+            <div data-testid="mirroring_mode_settings" className="flex flex-col gap-3.5">
+              {/* Служба тача (Спец. возможности) */}
+              <div
+                data-testid="accessibility_touch_service_card"
+                className={`rounded-xl bg-[#0B0E14] border p-3 flex flex-col gap-2.5 ${
+                  checklistStatus.step3AccessibilityEnabled
+                    ? 'border-[#10B981]/60'
+                    : 'border-[#F59E0B]/70'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[13px] font-semibold text-[#F1F5F9]">
+                      Служба тача (CarLifeAccessibilityService)
+                    </div>
+                    <div className="text-[11px] text-[#94A3B8] mt-0.5">
+                      Передаёт касания с экрана ГУ в экран смартфона через dispatchGesture
+                    </div>
+                  </div>
+                  <span
+                    data-testid="a11y_status_badge"
+                    className={`shrink-0 rounded-md px-2.5 py-1 text-[11px] font-semibold ${
+                      checklistStatus.step3AccessibilityEnabled
+                        ? 'bg-[#064E3B] text-[#10B981]'
+                        : 'bg-[#451A03] text-[#F59E0B]'
+                    }`}
+                  >
+                    {checklistStatus.step3AccessibilityEnabled ? 'Вкл' : 'Выкл'}
+                  </span>
+                </div>
 
-          <p className="text-[12px] text-[#94A3B8]">
-            Битрейт кодека (AVCProfileBaseline CBR, 30fps, I=1s, 2.0 Мбит/с по умолчанию)
-          </p>
+                <button
+                  type="button"
+                  onClick={onToggleAccessibility}
+                  data-testid="enable_accessibility_touch_btn"
+                  className={`w-full min-h-[44px] rounded-[10px] px-4 flex items-center justify-center gap-2 font-semibold text-[13px] transition cursor-pointer ${
+                    checklistStatus.step3AccessibilityEnabled
+                      ? 'bg-[#1E2636] text-[#10B981] border border-[#10B981]/50'
+                      : 'bg-[#00B4D8] text-[#001D24] hover:brightness-110'
+                  }`}
+                >
+                  <TouchAppIcon className="w-[18px] h-[18px]" />
+                  <span>
+                    {checklistStatus.step3AccessibilityEnabled
+                      ? 'Служба тача активна (Спец. возможности)'
+                      : 'Включить службу тача (Спец. возможности)'}
+                  </span>
+                </button>
 
-          <div className="grid grid-cols-3 gap-2">
-            <SelectableOptionButton
-              label="800 кбит/с"
-              selected={state.configuredBitrateBps === 800_000}
-              testTag="bitrate_2m_btn"
-              onClick={() => onSelectBitrate(800)}
-            />
-            <SelectableOptionButton
-              label="1.2 Мбит/с"
-              selected={state.configuredBitrateBps === 1_200_000}
-              testTag="bitrate_4m_btn"
-              onClick={() => onSelectBitrate(1200)}
-            />
-            <SelectableOptionButton
-              label="2.0 Мбит/с"
-              selected={state.configuredBitrateBps === 2_000_000}
-              testTag="bitrate_6m_btn"
-              onClick={() => onSelectBitrate(2000)}
-            />
-          </div>
+                {!checklistStatus.step5MediaProjectionGranted && (
+                  <button
+                    type="button"
+                    onClick={onRequestMediaProjection}
+                    data-testid="mirroring_request_mp_btn"
+                    className="w-full min-h-[40px] rounded-[10px] px-3 bg-[#1E2636] border border-[#222938] hover:border-[#00B4D8]/60 text-[12px] font-semibold text-[#F1F5F9] cursor-pointer transition"
+                  >
+                    Выдать разрешение MediaProjection («Весь экран»)
+                  </button>
+                )}
+              </div>
 
-          <p className="text-[12px] text-[#94A3B8]">
-            Формат шапки видеоканала 0x0002 (Режим 1: AOA 20B с 0x00020001 по умолчанию)
-          </p>
+              {/* Качество потока: 1280×720, FPS (25/30), режим VBR, densityDpi (160/200) */}
+              <div className="rounded-xl bg-[#0B0E14] border border-[#222938] p-3 flex flex-col gap-2.5">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[13px] font-semibold text-[#F1F5F9]">Качество потока</span>
+                  <span className="rounded-md px-2 py-0.5 text-[10px] font-semibold bg-[#10B981]/15 border border-[#10B981]/50 text-[#10B981]">
+                    VBR • Baseline L3 • QP≤36
+                  </span>
+                </div>
 
-          <div className="flex items-center gap-2">
-            <SelectableOptionButton
-              label="Режим 1: AOA 20B (0x00020001)"
-              selected={state.useNestedVideoMsgHeader}
-              testTag="toggle_video_header_mode_btn"
-              onClick={() => onSetVideoHeaderMode(true)}
-              className="flex-[1.25]"
-            />
-            <SelectableOptionButton
-              label="Режим 2: Direct 12B"
-              selected={!state.useNestedVideoMsgHeader}
-              testTag="video_header_legacy_12b_btn"
-              onClick={() => onSetVideoHeaderMode(false)}
-              className="flex-1"
-            />
-          </div>
-        </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <SelectableOptionButton
+                    label="800 × 480"
+                    selected={state.configuredWidth === 800}
+                    testTag="res_480p_btn"
+                    onClick={() => onSelectResolution(800, 480)}
+                  />
+                  <SelectableOptionButton
+                    label="1024 × 600"
+                    selected={state.configuredWidth === 1024}
+                    testTag="res_600p_btn"
+                    onClick={() => onSelectResolution(1024, 600)}
+                  />
+                  <SelectableOptionButton
+                    label="1280 × 720"
+                    selected={state.configuredWidth === 1280}
+                    testTag="res_720p_btn"
+                    onClick={() => onSelectResolution(1280, 720)}
+                  />
+                </div>
 
-        {/* 2.5 Jetta VS7 Fixed Profile */}
-        <div
-          data-testid="auto_test_card"
-          className="w-full rounded-2xl bg-[#151A24] border border-[#10B981] p-4 flex flex-col gap-3"
+                <div className="grid grid-cols-2 gap-2">
+                  <SelectableOptionButton
+                    label="25 fps"
+                    selected={state.configuredFps === 25}
+                    testTag="fps_25_btn"
+                    onClick={() => onSelectFps(25)}
+                  />
+                  <SelectableOptionButton
+                    label="30 fps"
+                    selected={state.configuredFps === 30}
+                    testTag="fps_30_btn"
+                    onClick={() => onSelectFps(30)}
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <SelectableOptionButton
+                    label="160 dpi"
+                    selected={state.virtualDisplayDensityDpi === 160}
+                    testTag="dpi_160_btn"
+                    onClick={() => onSelectDensityDpi(160)}
+                  />
+                  <SelectableOptionButton
+                    label="200 dpi"
+                    selected={state.virtualDisplayDensityDpi === 200}
+                    testTag="dpi_200_btn"
+                    onClick={() => onSelectDensityDpi(200)}
+                  />
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  <SelectableOptionButton
+                    label="VBR 800 кбит/с"
+                    selected={state.configuredBitrateBps === 800_000}
+                    testTag="bitrate_800_btn"
+                    onClick={() => onSelectBitrate(800)}
+                  />
+                  <SelectableOptionButton
+                    label="VBR 1.2 Мбит/с"
+                    selected={state.configuredBitrateBps === 1_200_000}
+                    testTag="bitrate_1200_btn"
+                    onClick={() => onSelectBitrate(1200)}
+                  />
+                  <SelectableOptionButton
+                    label="VBR 2.0 Мбит/с"
+                    selected={state.configuredBitrateBps === 2_000_000}
+                    testTag="bitrate_2000_btn"
+                    onClick={() => onSelectBitrate(2000)}
+                  />
+                </div>
+              </div>
+
+              {/* Тумблеры экрана телефона */}
+              <div className="flex flex-col gap-2">
+                <ToggleSettingRow
+                  title="Не выключать экран телефона"
+                  description="Удерживает FLAG_KEEP_SCREEN_ON во время трансляции экрана (вкл. по умолчанию)"
+                  checked={state.keepPhoneScreenOn}
+                  onToggle={onSetKeepPhoneScreenOn}
+                  testTag="keep_phone_screen_on_switch"
+                  accentColor="emerald"
+                />
+                <ToggleSettingRow
+                  title="Принудительная альбомная ориентация"
+                  description="Фиксирует горизонтальный режим экрана при зеркалировании (если поддерживается устройством)"
+                  checked={state.forceLandscapeMirroring}
+                  onToggle={onSetForceLandscapeMirroring}
+                  testTag="force_landscape_mirroring_switch"
+                />
+              </div>
+
+              {proj.isRunning && mediaStream && !isCanvasTestCard && (
+                <MediaStreamPreview stream={mediaStream} />
+              )}
+            </div>
+          )}
+
+          {/* Ветка 3: «Кокпит + Shizuku» */}
+          {state.appMode === AppMode.SHIZUKU_COCKPIT && (
+            <div data-testid="shizuku_mode_settings" className="flex flex-col gap-3.5">
+              {/* Статус и права Shizuku */}
+              <div className="rounded-xl bg-[#0B0E14] border border-[#222938] p-3 flex flex-col gap-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[13px] font-semibold text-[#F1F5F9]">
+                      Служба Shizuku (AIDL)
+                    </div>
+                    <div className="text-[11px] text-[#94A3B8] truncate">
+                      {shizuku.userServiceBound
+                        ? `Привязан к VD #${shizuku.boundDisplayId} • ${shizuku.userServiceComponent}`
+                        : shizuku.lastAidlCall}
+                    </div>
+                  </div>
+                  <span
+                    data-testid="shizuku_status_badge"
+                    className={`shrink-0 rounded-md px-2.5 py-1 text-[11px] font-semibold border ${shizukuBadgeStyle}`}
+                  >
+                    {shizuku.statusLabel}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={onRequestShizukuPermission}
+                    data-testid="request_shizuku_permission_btn"
+                    className={`flex-1 min-h-[44px] rounded-[10px] px-3 text-[13px] font-semibold transition cursor-pointer ${
+                      shizuku.permissionGranted && shizuku.binderAlive
+                        ? 'bg-[#064E3B] text-[#10B981] border border-[#10B981]/50'
+                        : 'bg-[#00B4D8] text-[#001D24] hover:brightness-110'
+                    }`}
+                  >
+                    {shizuku.permissionGranted && shizuku.binderAlive
+                      ? 'Права Shizuku выданы'
+                      : 'Запросить права Shizuku'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onToggleShizukuDaemon}
+                    data-testid="toggle_shizuku_daemon_btn"
+                    className="min-h-[44px] rounded-[10px] px-3 bg-[#1E2636] border border-[#222938] text-[11px] font-medium text-[#94A3B8] hover:text-[#F1F5F9] cursor-pointer shrink-0"
+                  >
+                    {shizuku.binderAlive ? 'Служба: ВКЛ' : 'Служба: ВЫКЛ'}
+                  </button>
+                </div>
+
+                {/* Сворачиваемый блок «Как настроить Shizuku (инструкция)» */}
+                <div
+                  data-testid="shizuku_setup_guide_block"
+                  className="rounded-lg bg-[#151A24] border border-[#222938] overflow-hidden"
+                >
+                  <button
+                    type="button"
+                    onClick={() => setShizukuGuideExpanded((v) => !v)}
+                    data-testid="toggle_shizuku_guide_btn"
+                    className="w-full px-3 py-2.5 flex items-center justify-between gap-2 text-left hover:bg-[#1E2636]/70 transition cursor-pointer"
+                  >
+                    <span className="text-[12px] font-semibold text-[#00B4D8]">
+                      Как настроить Shizuku (инструкция)
+                    </span>
+                    {shizukuGuideExpanded ? (
+                      <ChevronUpIcon className="w-4 h-4 text-[#00B4D8] shrink-0" />
+                    ) : (
+                      <ChevronDownIcon className="w-4 h-4 text-[#00B4D8] shrink-0" />
+                    )}
+                  </button>
+
+                  {shizukuGuideExpanded && (
+                    <div className="px-3 pb-3 pt-1.5 flex flex-col gap-2.5 border-t border-[#222938]">
+                      <ol className="flex flex-col gap-2 text-[11px] text-[#94A3B8] leading-relaxed list-none">
+                        <li>
+                          <span className="font-semibold text-[#F1F5F9]">1. Установите Shizuku</span>{' '}
+                          на смартфон (из Google Play или GitHub) и подключите телефон к любой сети
+                          Wi-Fi (нужно только на момент запуска).
+                        </li>
+                        <li>
+                          <span className="font-semibold text-[#F1F5F9]">
+                            2. Включите «Отладку по Wi-Fi»:
+                          </span>{' '}
+                          откройте <em>Параметры разработчика</em> → включите{' '}
+                          <em>«Отладка по Wi-Fi»</em> → нажмите на этот пункт → выберите{' '}
+                          <em>«Подключить устройство с помощью кода сопряжения»</em>.
+                        </li>
+                        <li>
+                          <span className="font-semibold text-[#F1F5F9]">
+                            3. Выполните сопряжение и запуск:
+                          </span>{' '}
+                          откройте Shizuku → нажмите <em>«Сопряжение»</em>, введите 6-значный код в
+                          уведомлении, затем вернитесь в Shizuku и нажмите <em>«Запуск»</em>{' '}
+                          (дождитесь статуса «Shizuku работает»).
+                        </li>
+                        <li>
+                          <span className="font-semibold text-[#F1F5F9]">
+                            4. Выдайте права приложению:
+                          </span>{' '}
+                          вернитесь сюда и нажмите <em>«Запросить права Shizuku»</em> →{' '}
+                          <em>«Разрешить всегда»</em>. После этого Wi-Fi можно отключить (служба
+                          работает до перезагрузки телефона).
+                        </li>
+                      </ol>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={onOpenShizukuApp}
+                          data-testid="open_shizuku_app_btn"
+                          className="min-h-[38px] rounded-lg px-2.5 py-1.5 bg-[#1E2636] border border-[#222938] hover:border-[#00B4D8]/60 text-[11px] font-semibold text-[#F1F5F9] text-center transition cursor-pointer"
+                        >
+                          Открыть Shizuku
+                        </button>
+                        <button
+                          type="button"
+                          onClick={onOpenDeveloperSettings}
+                          data-testid="open_developer_settings_btn"
+                          className="min-h-[38px] rounded-lg px-2.5 py-1.5 bg-[#1E2636] border border-[#222938] hover:border-[#00B4D8]/60 text-[11px] font-semibold text-[#F1F5F9] text-center transition cursor-pointer"
+                        >
+                          Параметры разработчика
+                        </button>
+                        <button
+                          type="button"
+                          onClick={onRequestShizukuPermission}
+                          data-testid="guide_request_shizuku_permission_btn"
+                          className="min-h-[38px] rounded-lg px-2.5 py-1.5 bg-[#00B4D8] text-[#001D24] hover:brightness-110 text-[11px] font-semibold text-center transition cursor-pointer"
+                        >
+                          Запросить права Shizuku
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Разрешение и DPI второго экрана (1280×720, 160 dpi, VBR) */}
+              <div className="rounded-xl bg-[#0B0E14] border border-[#222938] p-3 flex flex-col gap-2.5">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-[13px] font-semibold text-[#F1F5F9]">
+                    Параметры второго экрана (VirtualDisplay)
+                  </span>
+                  <span className="rounded-md px-2 py-0.5 text-[10px] font-semibold bg-[#10B981]/15 border border-[#10B981]/50 text-[#10B981]">
+                    VBR • {state.configuredBitrateBps / 1000} кбит/с • {state.configuredFps} fps
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  <SelectableOptionButton
+                    label="800 × 480"
+                    selected={state.configuredWidth === 800}
+                    testTag="res_480p_btn"
+                    onClick={() => onSelectResolution(800, 480)}
+                  />
+                  <SelectableOptionButton
+                    label="1024 × 600"
+                    selected={state.configuredWidth === 1024}
+                    testTag="res_600p_btn"
+                    onClick={() => onSelectResolution(1024, 600)}
+                  />
+                  <SelectableOptionButton
+                    label="1280 × 720"
+                    selected={state.configuredWidth === 1280}
+                    testTag="res_720p_btn"
+                    onClick={() => onSelectResolution(1280, 720)}
+                  />
+                </div>
+
+                <div className="grid grid-cols-3 gap-2">
+                  <SelectableOptionButton
+                    label="160 dpi"
+                    selected={state.virtualDisplayDensityDpi === 160}
+                    testTag="dpi_160_btn"
+                    onClick={() => onSelectDensityDpi(160)}
+                  />
+                  <SelectableOptionButton
+                    label="180 dpi"
+                    selected={state.virtualDisplayDensityDpi === 180}
+                    testTag="dpi_180_btn"
+                    onClick={() => onSelectDensityDpi(180)}
+                  />
+                  <SelectableOptionButton
+                    label="200 dpi"
+                    selected={state.virtualDisplayDensityDpi === 200}
+                    testTag="dpi_200_btn"
+                    onClick={() => onSelectDensityDpi(200)}
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <SelectableOptionButton
+                    label="25 fps"
+                    selected={state.configuredFps === 25}
+                    testTag="fps_25_btn"
+                    onClick={() => onSelectFps(25)}
+                  />
+                  <SelectableOptionButton
+                    label="30 fps"
+                    selected={state.configuredFps === 30}
+                    testTag="fps_30_btn"
+                    onClick={() => onSelectFps(30)}
+                  />
+                </div>
+              </div>
+
+              {/* Настройка системных кнопок «Домой» / «Назад» для VirtualDisplay */}
+              <div
+                data-testid="shizuku_vd_nav_buttons_block"
+                className="rounded-xl bg-[#0B0E14] border border-[#222938] p-3 flex flex-col gap-2.5"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[13px] font-semibold text-[#F1F5F9]">
+                      Системные кнопки «Домой» / «Назад» для VirtualDisplay
+                    </div>
+                    <div className="text-[11px] text-[#94A3B8] mt-0.5">
+                      Отправка KEYCODE_HOME (3) и KEYCODE_BACK (4) на displayId={shizuku.boundDisplayId} через Shizuku
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={state.shizukuVdNavButtonsEnabled}
+                    onClick={() =>
+                      onSetShizukuVdNavButtonsEnabled(!state.shizukuVdNavButtonsEnabled)
+                    }
+                    data-testid="shizuku_vd_nav_buttons_switch"
+                    className={`w-11 h-6 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
+                      state.shizukuVdNavButtonsEnabled ? 'bg-[#00B4D8]' : 'bg-[#1E2636]'
+                    }`}
+                  >
+                    <span
+                      className={`block w-5 h-5 rounded-full transition-transform ${
+                        state.shizukuVdNavButtonsEnabled
+                          ? 'translate-x-5 bg-[#0B0E14]'
+                          : 'translate-x-0 bg-[#94A3B8]'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {state.shizukuVdNavButtonsEnabled && (
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      <SelectableOptionButton
+                        label="Боковой док"
+                        selected={state.shizukuVdNavButtonsLayout === 'dock'}
+                        testTag="shizuku_nav_layout_dock_btn"
+                        onClick={() => onSetShizukuVdNavButtonsLayout('dock')}
+                      />
+                      <SelectableOptionButton
+                        label="Плавающая панель"
+                        selected={state.shizukuVdNavButtonsLayout === 'floating'}
+                        testTag="shizuku_nav_layout_floating_btn"
+                        onClick={() => onSetShizukuVdNavButtonsLayout('floating')}
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={onTriggerVdHome}
+                        data-testid="shizuku_test_home_btn"
+                        className="h-10 rounded-[10px] bg-[#1E2636] border border-[#222938] hover:border-[#00B4D8] text-[#F1F5F9] text-[12px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition"
+                      >
+                        <HomeIcon className="w-4 h-4 text-[#00B4D8]" />
+                        <span>Домой (VD #{shizuku.boundDisplayId})</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={onTriggerVdBack}
+                        data-testid="shizuku_test_back_btn"
+                        className="h-10 rounded-[10px] bg-[#1E2636] border border-[#222938] hover:border-[#00B4D8] text-[#F1F5F9] text-[12px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition"
+                      >
+                        <ArrowBackIcon className="w-4 h-4 text-[#F1F5F9]" />
+                        <span>Назад (VD #{shizuku.boundDisplayId})</span>
+                      </button>
+                    </div>
+
+                    <div className="text-[11px] font-mono-jetbrains text-[#94A3B8] truncate">
+                      {lastLaunchStatus}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* 3. Блок «Общие настройки (Звук и USB)» */}
+        <section
+          data-testid="general_audio_usb_settings_card"
+          className="w-full rounded-2xl bg-[#151A24] border border-[#222938] p-4 flex flex-col gap-2.5"
         >
           <div className="flex items-center justify-between gap-2">
-            <div className="flex-1 min-w-0">
-              <h3 className="text-[16px] font-semibold text-[#F1F5F9]">
-                Профиль Jetta VS7 (AOA 20B 0x00020001 + Audio Init)
-              </h3>
-              <p className="text-[11px] text-[#94A3B8] mt-1 leading-relaxed">
-                После 0x00018001 / 0x00018003 отправляются MATCH_STATUS (0x00010002), полный MD_INFO (0x00010004), Audio-Init (0x0003, 0x0004), INIT_DONE (0x00010008), SCREEN_ON (0x00010018), USERPRESENT (0x0001001A), FOREGROUND (0x0001001B), REQ_FG (0x00010038) и видеопоток 0x0002 (AOA 20B 0x00020001, единый пакет SPS+PPS+IDR, при простое &gt;200 мс — HEARTBEAT 0x00020002).
-              </p>
-            </div>
-            <span className="shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-semibold bg-[#064E3B] border border-[#10B981] text-[#10B981] whitespace-nowrap">
-              JETTA VS7
+            <h2 className="text-[16px] font-semibold text-[#F1F5F9]">
+              Общие настройки (Звук и USB)
+            </h2>
+            <span
+              className={`shrink-0 rounded-lg px-2.5 py-1 text-[11px] font-semibold whitespace-nowrap ${
+                audioStats.isCapturing
+                  ? 'bg-[#064E3B] text-[#10B981]'
+                  : state.transmitAudioOverUsb
+                  ? 'bg-[#1E2636] text-[#00B4D8]'
+                  : 'bg-[#1E2636] text-[#64748B]'
+              }`}
+            >
+              {audioStats.isCapturing
+                ? '0x0003 PCM ON'
+                : state.transmitAudioOverUsb
+                ? '0x0003 ГОТОВ'
+                : '0x0003 ВЫКЛ'}
             </span>
           </div>
 
-          <div className="rounded-[10px] bg-[#10B981]/12 border border-[#10B981]/65 px-3 py-2 text-[12px] font-medium text-[#10B981]">
-            {state.autoTestState.statusMessage}
+          <ToggleSettingRow
+            title="Передавать звук по USB (канал 0x0003)"
+            description="AudioPlaybackCapture 48 кГц Stereo 16-bit PCM (по умолчанию включено)"
+            checked={state.transmitAudioOverUsb}
+            onToggle={onSetTransmitAudioOverUsb}
+            testTag="transmit_audio_usb_switch"
+            accentColor="emerald"
+          />
+
+          <ToggleSettingRow
+            title="Глушить динамик телефона при USB-звуке"
+            description={
+              audioStats.isPhoneSpeakerMutedByBridge
+                ? `Динамик заглушен: STREAM_MUSIC=0 (сохранена громкость ${audioStats.savedPhoneMusicVolume ?? 0}/15)`
+                : `При старте сохраняет STREAM_MUSIC (${audioStats.currentPhoneMusicVolume}/15), ставит 0 и восстанавливает при отключении USB`
+            }
+            checked={state.mutePhoneSpeakerDuringUsbAudio}
+            onToggle={onSetMutePhoneSpeaker}
+            testTag="mute_speaker_usb_audio_switch"
+            accentColor="emerald"
+            disabled={!state.transmitAudioOverUsb}
+          />
+
+          <div
+            data-testid="hfp_bluetooth_info_row"
+            className="w-full rounded-xl bg-[#0B0E14] border border-[#222938] px-3 py-2.5 flex items-center gap-2.5"
+          >
+            <span className="w-2 h-2 rounded-full bg-[#00B4D8] shrink-0" />
+            <span className="text-[12px] text-[#CBD5E1]">
+              Звонки (HFP) работают через штатный Bluetooth ГУ
+            </span>
           </div>
 
-          <button
-            type="button"
-            onClick={onStartJettaVs7Vd}
-            data-testid="start_auto_test_btn"
-            className="w-full min-h-[48px] rounded-xl px-4 bg-[#00B4D8] text-[#001D24] font-semibold text-[13px] flex items-center justify-center gap-2 hover:brightness-110 transition cursor-pointer"
-          >
-            <CheckCircleIcon className="w-[18px] h-[18px] shrink-0" />
-            <span className="truncate">Стартовать VD (1280×720 • 2.0 Мбит/с • 160 dpi)</span>
-          </button>
-        </div>
+          <ToggleSettingRow
+            title="Автозапуск при подключении кабеля USB"
+            description="Автоматически запускает USB AOA сервис при подключении кабеля к головному устройству"
+            checked={state.autoStartOnUsbAttach}
+            onToggle={onSetAutoStartOnUsbAttach}
+            testTag="autostart_usb_attach_switch"
+          />
+        </section>
 
-        {/* 3. Expandable Engineering Diagnostics (AOA & Protocol Lab) */}
-        <div className="w-full rounded-2xl bg-[#151A24] border border-[#222938] p-4 flex flex-col gap-3">
+        {/* 4. Сворачиваемый блок «Инженерная диагностика (AOA & Protocol Lab)» (в самом низу, свёрнут по умолчанию) */}
+        <section
+          data-testid="engineering_diagnostics_card"
+          className="w-full rounded-2xl bg-[#151A24] border border-[#222938] p-4 flex flex-col gap-3"
+        >
           <button
             type="button"
             onClick={() => setDiagnosticsExpanded((v) => !v)}
@@ -953,11 +1148,11 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
             className="w-full rounded-[10px] py-1 flex items-center justify-between gap-2 text-left cursor-pointer hover:opacity-90"
           >
             <div className="flex-1 min-w-0">
-              <h3 className="text-[16px] font-semibold text-[#F1F5F9]">
+              <h2 className="text-[16px] font-semibold text-[#F1F5F9]">
                 Инженерная диагностика (AOA &amp; Protocol Lab)
-              </h3>
+              </h2>
               <p className="text-[11px] text-[#94A3B8] mt-0.5">
-                Статистика USB AOA, счетчики каналов 0x0001..0x0006 и генератор тестовых пакетов
+                Логирование пакетов, тест-карта (Canvas), счётчики каналов 0x0001..0x0006 и статистика USB AOA
               </p>
             </div>
             {diagnosticsExpanded ? (
@@ -969,99 +1164,41 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
 
           {diagnosticsExpanded && (
             <div className="flex flex-col gap-3 pt-1">
-              {/* Projection Engine Card */}
-              <div className="rounded-[14px] bg-[#1E2636] border border-[#222938] p-3 flex flex-col gap-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[13px] font-semibold text-[#F1F5F9]">
-                    {sourceMode === VideoSourceMode.SCREEN_MIRRORING
-                      ? 'Конвейер Зеркалирование экрана (MediaProjection) + H.264'
-                      : sourceMode === VideoSourceMode.VIRTUAL_DISPLAY
-                      ? 'Конвейер VirtualDisplay + H.264'
-                      : 'Конвейер Тест-карта (Canvas) + H.264'}
-                  </span>
-                  <span className="text-[11px] font-medium text-[#00B4D8] shrink-0">
-                    {proj.spsPpsConfigured ? 'SPS/PPS LOCKED' : 'AVC Baseline'}
-                  </span>
-                </div>
+              {/* Тумблер «Логировать пакеты в UI» + Переключатель «Тест-карта (Canvas)» */}
+              <ToggleSettingRow
+                title="Логировать пакеты в UI"
+                description={
+                  state.logPacketsInUi
+                    ? 'Включено — пакеты записываются в журнал ниже (нагружает UI на высоком FPS)'
+                    : 'Выключено по умолчанию — не тормозит телефон при потоковой передаче'
+                }
+                checked={state.logPacketsInUi}
+                onToggle={onSetLogPacketsInUi}
+                testTag="log_packets_ui_switch"
+              />
 
-                <div className="flex items-center gap-2">
-                  <MetricPill
-                    label="H.264 NALS"
-                    value={`${proj.encodedNalFrames}`}
-                    subValue={`${Math.floor(proj.encodedBytes / 1024)} KiB`}
-                  />
-                  <MetricPill
-                    label="TOUCH INJECT"
-                    value={`${proj.injectedTouches}`}
-                    subValue={
-                      sourceMode === VideoSourceMode.SCREEN_MIRRORING
-                        ? 'MIRROR A11Y'
-                        : sourceMode === VideoSourceMode.CANVAS_TEST_CARD
-                        ? 'CANVAS'
-                        : `VD #${proj.virtualDisplayId}`
-                    }
-                  />
-                  <MetricPill
-                    label="SURFACE"
-                    value={`${state.configuredWidth}×${state.configuredHeight}`}
-                    subValue={`${proj.fps} FPS`}
-                  />
-                </div>
+              <ToggleSettingRow
+                title="Тест-карта (Canvas)"
+                description="Отладка видеоканала 0x0002: прямая отрисовка тестового кадра JETTA VS7 TEST в H.264"
+                checked={isCanvasTestCard}
+                onToggle={onSetCanvasTestCardEnabled}
+                testTag="canvas_test_card_switch"
+                accentColor="emerald"
+              />
 
-                <div className="flex items-center gap-2 flex-wrap">
-                  {!proj.isRunning ? (
-                    <button
-                      type="button"
-                      onClick={onToggleProjection}
-                      data-testid="start_projection_btn"
-                      className="flex-1 h-10 rounded-[10px] bg-[#00B4D8] text-[#001D24] font-semibold text-[12px] flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <PlayArrowIcon className="w-[18px] h-[18px]" />
-                      <span>
-                        {sourceMode === VideoSourceMode.SCREEN_MIRRORING
-                          ? 'Запустить Зеркалирование (MediaProjection)'
-                          : sourceMode === VideoSourceMode.VIRTUAL_DISPLAY
-                          ? 'Запустить VirtualDisplay + H.264'
-                          : 'Запустить Тест-карту (Canvas) + H.264'}
-                      </span>
-                    </button>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => onInjectTouch(120, 180)}
-                        data-testid="inject_touch_dock_btn"
-                        className="flex-1 h-10 rounded-[10px] bg-[#151A24] border border-[#222938] text-[#F1F5F9] text-[12px] font-medium hover:border-[#00B4D8]/50 cursor-pointer"
-                      >
-                        Тест тача (Док)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onInjectTouch(680, 360)}
-                        data-testid="inject_touch_launcher_btn"
-                        className="flex-1 h-10 rounded-[10px] bg-[#151A24] border border-[#222938] text-[#F1F5F9] text-[12px] font-medium hover:border-[#00B4D8]/50 cursor-pointer"
-                      >
-                        Тест тача (Сетка)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={onToggleProjection}
-                        data-testid="stop_projection_btn"
-                        className="h-10 px-4 rounded-[10px] border border-[#222938] bg-[#151A24] text-[#EF4444] text-[12px] font-semibold cursor-pointer"
-                      >
-                        Стоп
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
+              {isCanvasTestCard && (
+                <CanvasTestCardPreview
+                  width={state.configuredWidth}
+                  height={state.configuredHeight}
+                />
+              )}
 
-              {/* Transport Controls Card */}
+              {/* Транспорт USB AOA и статистика TX/RX */}
               <div className="rounded-[14px] bg-[#1E2636] border border-[#222938] p-3 flex flex-col gap-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[13px] font-semibold text-[#F1F5F9]">Транспорт USB AOA</span>
                   <span className="text-[11px] font-medium text-[#10B981]">
-                    {state.wakeLockHeld ? 'WakeLock: ACTIVE' : 'DirectBufferPool'}
+                    {state.wakeLockHeld ? 'WakeLock: ACTIVE' : 'LinkedBlockingQueue TX'}
                   </span>
                 </div>
 
@@ -1077,13 +1214,36 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
                     subValue={`${state.txBytes} B`}
                   />
                   <MetricPill
-                    label="СТАТУС"
-                    value={state.controlSession.phase.slice(0, 8)}
-                    subValue={`${state.controlSession.negotiatedFps} FPS`}
+                    label="H.264 NALS"
+                    value={`${proj.encodedNalFrames}`}
+                    subValue={`${Math.floor(proj.encodedBytes / 1024)} KiB`}
                   />
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div
+                  data-testid="usb_tx_queue_stats"
+                  className="rounded-[10px] bg-[#0B0E14] border border-[#222938] px-2.5 py-1.5 font-mono-jetbrains text-[10px] text-[#94A3B8] flex flex-col gap-0.5"
+                >
+                  <div className="text-[#00B4D8]">
+                    {state.usbTxQueueStats.workerThreadName} • {state.usbTxQueueStats.threadPriority}
+                  </div>
+                  <div>
+                    0x0003 Priority TX: {state.usbTxQueueStats.prioritizedAudioFrames} • 0x0002 Queue:{' '}
+                    {state.usbTxQueueStats.queuedVideoFrames}/
+                    {state.usbTxQueueStats.maxVideoQueueFrames} • Drop stale P-frames:{' '}
+                    {state.usbTxQueueStats.droppedStalePFrames}
+                  </div>
+                  <div className="text-[#CBD5E1] break-all">
+                    0x0006:{' '}
+                    {proj.touchRouteTarget === 'SHIZUKU_INPUT_MANAGER'
+                      ? `ICarLifeShizukuService.injectTouch(displayId=${proj.virtualDisplayId || 2}) -> InputManager`
+                      : proj.touchRouteTarget === 'PRESENTATION_DECOR_VIEW'
+                      ? `presentation.window.decorView.dispatchTouchEvent (lastDownTime=${proj.touchLastDownTimeMs ?? '—'})`
+                      : 'CarLifeAccessibilityService.dispatchGesture (currentWindowMetrics.bounds)'}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
                   <button
                     type="button"
                     onClick={onScanAndAttachUsb}
@@ -1092,6 +1252,16 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
                   >
                     <RefreshIcon className="w-[18px] h-[18px]" />
                     <span>Scan &amp; Attach USB AOA</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={onToggleProjection}
+                    data-testid="toggle_projection_diag_btn"
+                    className="h-10 px-3 rounded-[10px] border border-[#222938] bg-[#151A24] text-[#F1F5F9] text-[12px] font-medium flex items-center gap-1 cursor-pointer"
+                  >
+                    <PlayArrowIcon className="w-4 h-4 text-[#10B981]" />
+                    <span>{proj.isRunning ? 'Пауза видео' : 'Старт видео'}</span>
                   </button>
 
                   {state.isServiceRunning && (
@@ -1108,10 +1278,10 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
                 </div>
               </div>
 
-              {/* Channel Multiplexer Grid */}
+              {/* Счётчики каналов 0x0001 .. 0x0006 */}
               <div className="rounded-[14px] bg-[#1E2636] border border-[#222938] p-3 flex flex-col gap-2">
                 <div className="text-[13px] font-semibold text-[#F1F5F9]">
-                  Каналы мультиплексора CarLife (0x0001 .. 0x0006)
+                  Счётчики каналов CarLife (0x0001 .. 0x0006)
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   {CARLIFE_CHANNELS.map((ch) => {
@@ -1148,7 +1318,63 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
                 </div>
               </div>
 
-              {/* Protocol Lab Test Vectors */}
+              {/* Заголовок видеоканала, профиль Jetta VS7 и Handshake Lab */}
+              <div className="rounded-[14px] bg-[#1E2636] border border-[#222938] p-3 flex flex-col gap-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[13px] font-semibold text-[#F1F5F9]">
+                    Профиль протокола и заголовок 0x0002
+                  </span>
+                  <span className="text-[11px] font-medium text-[#10B981]">
+                    ТЕСТ {state.handshakeTestProfileId}/4
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <SelectableOptionButton
+                    label="Режим 1: AOA 20B (0x00020001)"
+                    selected={state.useNestedVideoMsgHeader}
+                    testTag="toggle_video_header_mode_btn"
+                    onClick={() => onSetVideoHeaderMode(true)}
+                    className="flex-[1.25]"
+                  />
+                  <SelectableOptionButton
+                    label="Режим 2: Direct 12B"
+                    selected={!state.useNestedVideoMsgHeader}
+                    testTag="video_header_legacy_12b_btn"
+                    onClick={() => onSetVideoHeaderMode(false)}
+                    className="flex-1"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-1.5">
+                  {HANDSHAKE_TEST_PROFILES.map((profile) => {
+                    const isSelected = state.handshakeTestProfileId === profile.id;
+                    return (
+                      <SelectableOptionButton
+                        key={profile.id}
+                        label={profile.shortTitle}
+                        selected={isSelected}
+                        testTag={`handshake_profile_${profile.id}_btn`}
+                        onClick={() => onSetHandshakeProfile(profile.id)}
+                      />
+                    );
+                  })}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={onStartJettaVs7Vd}
+                  data-testid="start_auto_test_btn"
+                  className="w-full min-h-[42px] rounded-xl px-3 bg-[#151A24] border border-[#10B981]/60 text-[#10B981] font-semibold text-[12px] flex items-center justify-center gap-2 hover:bg-[#10B981]/10 transition cursor-pointer"
+                >
+                  <CheckCircleIcon className="w-4 h-4 shrink-0" />
+                  <span className="truncate">
+                    Сброс на профиль Jetta VS7 (1280×720 • VBR 2.0 Мбит/с • 160 dpi)
+                  </span>
+                </button>
+              </div>
+
+              {/* Тестовые векторы протокола */}
               <div className="rounded-[14px] bg-[#1E2636] border border-[#222938] p-3 flex flex-col gap-2.5">
                 <div className="text-[13px] font-semibold text-[#00B4D8]">
                   Тестовые векторы протокола Baidu CarLife
@@ -1241,7 +1467,7 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
                 </div>
               </div>
 
-              {/* Binary Packet Log Header + Filter Tabs */}
+              {/* Журнал бинарных пакетов */}
               <div className="flex items-center justify-between pt-1">
                 <span className="text-[13px] font-semibold text-[#00B4D8]">
                   Журнал бинарных пакетов
@@ -1274,26 +1500,6 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
                 />
               </div>
 
-              {selectedLogTab === 1 && (
-                <div className="rounded-xl bg-[#1E2636] border border-[#222938] p-3 flex flex-col gap-1">
-                  <div className="text-[12px] font-semibold text-[#10B981]">
-                    Статистика видеоканала 0x0002 •{' '}
-                    {state.useNestedVideoMsgHeader
-                      ? 'Режим 1: AOA 20B (8B AOA + 12B 0x00020001)'
-                      : 'Режим 2: Direct 12B ([0x0002][nalSize][ts])'}
-                  </div>
-                  <div className="font-mono-jetbrains text-[11px] text-[#94A3B8]">
-                    {state.isVideoChannelReadyForStreaming
-                      ? 'Шлюз 0x0002: ОТКРЫТ (поток 0x0002 активен)'
-                      : 'Шлюз 0x0002: ЗАКРЫТ (ожидание 0x00018001 / 0x00018007 от ГУ)'}{' '}
-                    • Кадров 0x0002: {state.channelFrameCounts[CarLifeChannelId.VIDEO] ?? 0} • Кодек:{' '}
-                    {proj.width}×{proj.height}@{proj.fps}fps ({state.configuredBitrateBps / 1000} kbps) •
-                    IDR: {proj.lastIdrBytes}B
-                  </div>
-                </div>
-              )}
-
-              {/* Log Entries */}
               {displayedLogs.length === 0 ? (
                 <div className="rounded-xl bg-[#1E2636] border border-[#222938] p-4 text-center text-[12px] text-[#64748B]">
                   Пакеты ещё не записаны. Запустите тестовый вектор выше или подключите USB AOA.
@@ -1307,7 +1513,7 @@ export const UnifiedSettingsAndDiagnosticsScreen: React.FC<
               )}
             </div>
           )}
-        </div>
+        </section>
       </div>
     </div>
   );

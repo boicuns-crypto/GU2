@@ -1,6 +1,8 @@
 import {
   CarLifeChannelId,
   CarLifeMsgType,
+  KEYCODE_BACK,
+  KEYCODE_HOME,
   channelInfo,
 } from '../protocol/carlifeConstants';
 import {
@@ -12,29 +14,46 @@ import {
   CarLifeFrameCodec,
   parseCommandMessageOrNull,
 } from '../protocol/carlifeFrameCodec';
-import { CarLifeTouchDecoder } from '../protocol/carlifeTouchDecoder';
+import {
+  CarLifeTouchDecoder,
+  CarLifeTouchEventType,
+  TouchDispatchTarget,
+  TouchRouteState,
+  routeTouchEventByMode,
+} from '../protocol/carlifeTouchDecoder';
 import {
   CarlifeProtocolVersionProto,
   CarlifeVideoEncoderInfoProto,
 } from '../protocol/carlifeWireProtobuf';
+import {
+  CarLifeShizukuServiceStub,
+  SHIZUKU_PACKAGE_NAME,
+  SHIZUKU_REQ_CODE,
+  ShizukuServiceState,
+  deriveShizukuStatus,
+} from '../protocol/shizukuServiceBridge';
 
 export enum AppMode {
   COCKPIT = 'cockpit',
   MIRRORING = 'mirroring',
+  SHIZUKU_COCKPIT = 'shizuku_cockpit',
 }
 
 export const APP_MODE_META: Record<AppMode, { id: AppMode; title: string; subtitle: string }> = {
   [AppMode.COCKPIT]: {
     id: AppMode.COCKPIT,
-    title: 'Кокпит (Виртуальный экран)',
-    subtitle:
-      'Лаунчер ГУ на VirtualDisplay (Presentation). Тач 0x0006 идёт строго в Presentation.decorView без AccessibilityService.',
+    title: 'Кокпит',
+    subtitle: 'Встроенный лаунчер на VirtualDisplay',
   },
   [AppMode.MIRRORING]: {
     id: AppMode.MIRRORING,
-    title: 'Зеркалирование (Экран телефона)',
-    subtitle:
-      'Прямой захват экрана смартфона (MediaProjection, 1280×720@30fps). Тач 0x0006 идёт строго через CarLifeAccessibilityService.',
+    title: 'Зеркалирование',
+    subtitle: 'Захват экрана телефона через MediaProjection',
+  },
+  [AppMode.SHIZUKU_COCKPIT]: {
+    id: AppMode.SHIZUKU_COCKPIT,
+    title: 'Кокпит + Shizuku',
+    subtitle: 'Независимый второй экран для любых приложений',
   },
 };
 
@@ -109,6 +128,31 @@ export interface PacketLogEntry {
   hexPreview: string;
 }
 
+export interface MediaCodecEncoderConfig {
+  width: number;
+  height: number;
+  frameRate: 25 | 30;
+  bitrateBps: number;
+  iFrameIntervalSec: 1;
+  bitrateMode: 'BITRATE_MODE_VBR (1)';
+  profile: 'AVCProfileBaseline (1)';
+  level: 'AVCLevel3 (0x100)';
+  repeatPreviousFrameAfterUs: 100_000;
+  priority: 0;
+  videoQpPMax: 36;
+  virtualDisplayDensityDpi: 160 | 180 | 200;
+}
+
+export interface UsbTxQueueStats {
+  workerThreadName: string;
+  threadPriority: string;
+  maxVideoQueueFrames: number;
+  queuedAudioFrames: number;
+  queuedVideoFrames: number;
+  droppedStalePFrames: number;
+  prioritizedAudioFrames: number;
+}
+
 export interface ProjectionPipelineStats {
   isRunning: boolean;
   appMode: AppMode;
@@ -125,6 +169,8 @@ export interface ProjectionPipelineStats {
   spsPpsConfigured: boolean;
   injectedTouches: number;
   lastTouchPoint: [number, number] | null;
+  touchRouteTarget: TouchDispatchTarget;
+  touchLastDownTimeMs: number | null;
   activeCockpitWidget: string;
   statusMessage: string;
 }
@@ -134,6 +180,7 @@ export interface AudioCaptureStats {
   hasRecordAudioPermission: boolean;
   mutePhoneSpeakerDuringUsbAudio: boolean;
   isPhoneSpeakerMutedByBridge: boolean;
+  currentPhoneMusicVolume: number;
   savedPhoneMusicVolume: number | null;
   mediaInitSent: boolean;
   sentInitPackets: number;
@@ -192,17 +239,29 @@ export interface BridgeRuntimeState {
   controlSession: CarLifeControlSessionState;
   projectionStats: ProjectionPipelineStats;
   audioCaptureStats: AudioCaptureStats;
+  mediaCodecConfig: MediaCodecEncoderConfig;
+  usbTxQueueStats: UsbTxQueueStats;
+  shizukuState: ShizukuServiceState;
   isVideoChannelReadyForStreaming: boolean;
   useNestedVideoMsgHeader: boolean;
   appMode: AppMode;
   logPacketsInUi: boolean;
+  transmitAudioOverUsb: boolean;
   mutePhoneSpeakerDuringUsbAudio: boolean;
+  autoStartOnUsbAttach: boolean;
+  keepPhoneScreenOn: boolean;
+  forceLandscapeMirroring: boolean;
+  launcherVisiblePackages: string[];
+  shizukuVdNavButtonsEnabled: boolean;
+  shizukuVdNavButtonsLayout: 'dock' | 'floating';
   videoSourceMode: VideoSourceMode;
   appLaunchMode: AppLaunchMode;
   handshakeTestProfileId: number;
   configuredWidth: number;
   configuredHeight: number;
+  configuredFps: 25 | 30;
   configuredBitrateBps: number;
+  virtualDisplayDensityDpi: 160 | 180 | 200;
   autoTestState: AutoTestState;
   lastTouchOrKeyEvent: string;
   rxBytes: number;
@@ -409,17 +468,30 @@ export const COCKPIT_INSTALLED_APPS: InstalledAppInfo[] = [
 const STORAGE_KEY_CHECKLIST = 'carlife_bridge_checklist_v1';
 const STORAGE_KEY_SETTINGS = 'carlife_bridge_settings_v1';
 
+const DEFAULT_LAUNCHER_PACKAGES = COCKPIT_INSTALLED_APPS.map((a) => a.packageName);
+
 interface PersistedSettings {
   appMode: AppMode;
   logPacketsInUi: boolean;
+  transmitAudioOverUsb: boolean;
   mutePhoneSpeakerDuringUsbAudio: boolean;
+  autoStartOnUsbAttach: boolean;
+  keepPhoneScreenOn: boolean;
+  forceLandscapeMirroring: boolean;
+  launcherVisiblePackages: string[];
+  shizukuVdNavButtonsEnabled: boolean;
+  shizukuVdNavButtonsLayout: 'dock' | 'floating';
   videoSourceMode: VideoSourceMode;
   appLaunchMode: AppLaunchMode;
   handshakeTestProfileId: number;
   configuredWidth: number;
   configuredHeight: number;
+  configuredFps: 25 | 30;
   configuredBitrateBps: number;
+  virtualDisplayDensityDpi: 160 | 180 | 200;
   useNestedVideoMsgHeader: boolean;
+  shizukuBinderAlive: boolean;
+  shizukuPermissionGranted: boolean;
 }
 
 function loadChecklistFromStorage(): SetupChecklistStatus {
@@ -453,26 +525,60 @@ function loadSettingsFromStorage(): PersistedSettings {
   const defaults: PersistedSettings = {
     appMode: AppMode.MIRRORING,
     logPacketsInUi: false,
+    transmitAudioOverUsb: true,
     mutePhoneSpeakerDuringUsbAudio: true,
+    autoStartOnUsbAttach: true,
+    keepPhoneScreenOn: true,
+    forceLandscapeMirroring: false,
+    launcherVisiblePackages: DEFAULT_LAUNCHER_PACKAGES,
+    shizukuVdNavButtonsEnabled: true,
+    shizukuVdNavButtonsLayout: 'dock',
     videoSourceMode: VideoSourceMode.SCREEN_MIRRORING,
     appLaunchMode: AppLaunchMode.VIRTUAL_DISPLAY_IF_AVAILABLE,
     handshakeTestProfileId: 4,
     configuredWidth: 1280,
     configuredHeight: 720,
+    configuredFps: 30,
     configuredBitrateBps: 2_000_000,
+    virtualDisplayDensityDpi: 160,
     useNestedVideoMsgHeader: true,
+    shizukuBinderAlive: true,
+    shizukuPermissionGranted: false,
   };
   try {
     const raw = localStorage.getItem(STORAGE_KEY_SETTINGS);
     if (!raw) return defaults;
     const parsed = JSON.parse(raw) as Partial<PersistedSettings>;
+    const appMode =
+      parsed.appMode === AppMode.COCKPIT
+        ? AppMode.COCKPIT
+        : parsed.appMode === AppMode.SHIZUKU_COCKPIT
+        ? AppMode.SHIZUKU_COCKPIT
+        : AppMode.MIRRORING;
+    const validPkgSet = new Set(DEFAULT_LAUNCHER_PACKAGES);
+    const parsedPkgs = Array.isArray(parsed.launcherVisiblePackages)
+      ? parsed.launcherVisiblePackages.filter((p): p is string => typeof p === 'string' && validPkgSet.has(p))
+      : DEFAULT_LAUNCHER_PACKAGES;
     return {
-      appMode: parsed.appMode === AppMode.COCKPIT ? AppMode.COCKPIT : AppMode.MIRRORING,
-      logPacketsInUi: Boolean(parsed.logPacketsInUi),
+      appMode,
+      logPacketsInUi: parsed.logPacketsInUi === true,
+      transmitAudioOverUsb:
+        parsed.transmitAudioOverUsb !== undefined ? Boolean(parsed.transmitAudioOverUsb) : true,
       mutePhoneSpeakerDuringUsbAudio:
         parsed.mutePhoneSpeakerDuringUsbAudio !== undefined
           ? Boolean(parsed.mutePhoneSpeakerDuringUsbAudio)
           : true,
+      autoStartOnUsbAttach:
+        parsed.autoStartOnUsbAttach !== undefined ? Boolean(parsed.autoStartOnUsbAttach) : true,
+      keepPhoneScreenOn:
+        parsed.keepPhoneScreenOn !== undefined ? Boolean(parsed.keepPhoneScreenOn) : true,
+      forceLandscapeMirroring: Boolean(parsed.forceLandscapeMirroring),
+      launcherVisiblePackages: parsedPkgs.length > 0 ? parsedPkgs : DEFAULT_LAUNCHER_PACKAGES,
+      shizukuVdNavButtonsEnabled:
+        parsed.shizukuVdNavButtonsEnabled !== undefined
+          ? Boolean(parsed.shizukuVdNavButtonsEnabled)
+          : true,
+      shizukuVdNavButtonsLayout: parsed.shizukuVdNavButtonsLayout === 'floating' ? 'floating' : 'dock',
       videoSourceMode: Object.values(VideoSourceMode).includes(parsed.videoSourceMode as VideoSourceMode)
         ? (parsed.videoSourceMode as VideoSourceMode)
         : VideoSourceMode.SCREEN_MIRRORING,
@@ -490,10 +596,18 @@ function loadSettingsFromStorage(): PersistedSettings {
         typeof parsed.configuredWidth === 'number' ? parsed.configuredWidth : 1280,
       configuredHeight:
         typeof parsed.configuredHeight === 'number' ? parsed.configuredHeight : 720,
+      configuredFps: parsed.configuredFps === 25 ? 25 : 30,
       configuredBitrateBps:
         typeof parsed.configuredBitrateBps === 'number' ? parsed.configuredBitrateBps : 2_000_000,
+      virtualDisplayDensityDpi:
+        parsed.virtualDisplayDensityDpi === 180 || parsed.virtualDisplayDensityDpi === 200
+          ? parsed.virtualDisplayDensityDpi
+          : 160,
       useNestedVideoMsgHeader:
         parsed.useNestedVideoMsgHeader !== undefined ? Boolean(parsed.useNestedVideoMsgHeader) : true,
+      shizukuBinderAlive:
+        parsed.shizukuBinderAlive !== undefined ? Boolean(parsed.shizukuBinderAlive) : true,
+      shizukuPermissionGranted: Boolean(parsed.shizukuPermissionGranted),
     };
   } catch {
     return defaults;
@@ -533,6 +647,11 @@ export class BridgeController {
   private streamTimer: number | null = null;
   private audioTimer: number | null = null;
   private mediaTicker: number | null = null;
+  private touchRouteState: TouchRouteState = {
+    lastDownTimeMs: null,
+    activeGestureDown: false,
+  };
+  private shizukuService = new CarLifeShizukuServiceStub();
   private snapshot: BridgeControllerSnapshot;
 
   constructor() {
@@ -557,20 +676,83 @@ export class BridgeController {
       durationMs: FALLBACK_PLAYLIST[0].durationMs,
     };
 
+    const mediaCodecConfig: MediaCodecEncoderConfig = {
+      width: savedSettings.configuredWidth,
+      height: savedSettings.configuredHeight,
+      frameRate: savedSettings.configuredFps,
+      bitrateBps: savedSettings.configuredBitrateBps,
+      iFrameIntervalSec: 1,
+      bitrateMode: 'BITRATE_MODE_VBR (1)',
+      profile: 'AVCProfileBaseline (1)',
+      level: 'AVCLevel3 (0x100)',
+      repeatPreviousFrameAfterUs: 100_000,
+      priority: 0,
+      videoQpPMax: 36,
+      virtualDisplayDensityDpi: savedSettings.virtualDisplayDensityDpi,
+    };
+
+    const shizukuDerived = deriveShizukuStatus(
+      savedSettings.shizukuBinderAlive,
+      savedSettings.shizukuPermissionGranted
+    );
+    const shouldBindShizuku =
+      savedSettings.appMode === AppMode.SHIZUKU_COCKPIT &&
+      savedSettings.shizukuBinderAlive &&
+      savedSettings.shizukuPermissionGranted;
+    if (shouldBindShizuku) {
+      this.shizukuService.bind();
+    }
+    const vdIdInit =
+      savedSettings.appMode === AppMode.SHIZUKU_COCKPIT ||
+      savedSettings.videoSourceMode === VideoSourceMode.VIRTUAL_DISPLAY
+        ? 2
+        : 0;
+    const touchTargetInit: TouchDispatchTarget =
+      savedSettings.appMode === AppMode.SHIZUKU_COCKPIT
+        ? 'SHIZUKU_INPUT_MANAGER'
+        : savedSettings.appMode === AppMode.COCKPIT
+        ? 'PRESENTATION_DECOR_VIEW'
+        : 'ACCESSIBILITY_DISPATCH_GESTURE';
+
     this.runtimeState = {
       isServiceRunning: true,
       wakeLockHeld: false,
       transportState: { kind: 'disconnected' },
       controlSession: this.stateMachine.state,
+      mediaCodecConfig,
+      usbTxQueueStats: {
+        workerThreadName: 'CarLife-USB-TX-Thread',
+        threadPriority: 'URGENT_AUDIO (-19)',
+        maxVideoQueueFrames: 5,
+        queuedAudioFrames: 0,
+        queuedVideoFrames: 0,
+        droppedStalePFrames: 0,
+        prioritizedAudioFrames: 0,
+      },
+      shizukuState: {
+        binderAlive: savedSettings.shizukuBinderAlive,
+        permissionGranted: savedSettings.shizukuPermissionGranted,
+        userServiceBound: shouldBindShizuku,
+        statusKind: shizukuDerived.kind,
+        statusLabel: shizukuDerived.label,
+        userServiceComponent: 'CarLifeShizukuService : ICarLifeShizukuService.Stub()',
+        boundDisplayId: vdIdInit || 2,
+        lastAidlCall: shouldBindShizuku
+          ? `Shizuku.bindUserService(CarLifeShizukuService) -> displayId=${vdIdInit || 2}`
+          : 'Ожидает привязки ShizukuUserService (ICarLifeShizukuService.aidl)',
+        amStartCount: 0,
+        injectedTouchCount: 0,
+        keyEventCount: 0,
+      },
       projectionStats: {
         isRunning: true,
         appMode: savedSettings.appMode,
         videoSourceMode: savedSettings.videoSourceMode,
         usingMediaProjection: this.checklist.step5MediaProjectionGranted,
-        virtualDisplayId: savedSettings.videoSourceMode === VideoSourceMode.VIRTUAL_DISPLAY ? 2 : 0,
+        virtualDisplayId: vdIdInit,
         width: savedSettings.configuredWidth,
         height: savedSettings.configuredHeight,
-        fps: 30,
+        fps: savedSettings.configuredFps,
         bitRateKbps: Math.round(savedSettings.configuredBitrateBps / 1000),
         encodedNalFrames: 0,
         encodedBytes: 0,
@@ -578,6 +760,8 @@ export class BridgeController {
         spsPpsConfigured: false,
         injectedTouches: 0,
         lastTouchPoint: null,
+        touchRouteTarget: touchTargetInit,
+        touchLastDownTimeMs: null,
         activeCockpitWidget:
           savedSettings.videoSourceMode === VideoSourceMode.SCREEN_MIRRORING
             ? 'Зеркалирование экрана (MediaProjection) готово'
@@ -592,15 +776,16 @@ export class BridgeController {
             : 'Тест-карта Canvas'
         } (${savedSettings.configuredWidth}×${savedSettings.configuredHeight} @ ${(
           savedSettings.configuredBitrateBps / 1_000_000
-        ).toFixed(1)} Мбит/с, CBR 30fps, ${
-          savedSettings.useNestedVideoMsgHeader ? 'AOA 20B' : 'Direct 12B'
-        })`,
+        ).toFixed(1)} Мбит/с, VBR ${savedSettings.configuredFps}fps, L3, QP≤36, ${
+          savedSettings.virtualDisplayDensityDpi
+        } dpi, ${savedSettings.useNestedVideoMsgHeader ? 'AOA 20B' : 'Direct 12B'})`,
       },
       audioCaptureStats: {
         isCapturing: false,
         hasRecordAudioPermission: true,
         mutePhoneSpeakerDuringUsbAudio: savedSettings.mutePhoneSpeakerDuringUsbAudio,
         isPhoneSpeakerMutedByBridge: false,
+        currentPhoneMusicVolume: 9,
         savedPhoneMusicVolume: 9,
         mediaInitSent: false,
         sentInitPackets: 0,
@@ -615,23 +800,29 @@ export class BridgeController {
       useNestedVideoMsgHeader: savedSettings.useNestedVideoMsgHeader,
       appMode: savedSettings.appMode,
       logPacketsInUi: savedSettings.logPacketsInUi,
+      transmitAudioOverUsb: savedSettings.transmitAudioOverUsb,
       mutePhoneSpeakerDuringUsbAudio: savedSettings.mutePhoneSpeakerDuringUsbAudio,
+      autoStartOnUsbAttach: savedSettings.autoStartOnUsbAttach,
+      keepPhoneScreenOn: savedSettings.keepPhoneScreenOn,
+      forceLandscapeMirroring: savedSettings.forceLandscapeMirroring,
+      launcherVisiblePackages: savedSettings.launcherVisiblePackages,
+      shizukuVdNavButtonsEnabled: savedSettings.shizukuVdNavButtonsEnabled,
+      shizukuVdNavButtonsLayout: savedSettings.shizukuVdNavButtonsLayout,
       videoSourceMode: savedSettings.videoSourceMode,
       appLaunchMode: savedSettings.appLaunchMode,
       handshakeTestProfileId: savedSettings.handshakeTestProfileId,
       configuredWidth: savedSettings.configuredWidth,
       configuredHeight: savedSettings.configuredHeight,
+      configuredFps: savedSettings.configuredFps,
       configuredBitrateBps: savedSettings.configuredBitrateBps,
+      virtualDisplayDensityDpi: savedSettings.virtualDisplayDensityDpi,
       autoTestState: {
         isRunning: false,
         currentStep: 0,
         totalSteps: 0,
-        activeProfileLabel:
-          '1280×720 • 2.0 Мбит/с • CBR 30fps • 160 dpi • AOA 20B (0x00020001)',
-        statusMessage:
-          'Авто-тестер отключён: зафиксирован профиль Jetta VS7 (1280×720 • 2.0 Мбит/с • CBR 30fps • 160 dpi • AOA 20B)',
-        matchedProfileLabel:
-          '1280×720 • 2.0 Мбит/с • CBR 30fps • 160 dpi • AOA 20B (0x00020001)',
+        activeProfileLabel: `${savedSettings.configuredWidth}×${savedSettings.configuredHeight} • 2.0 Мбит/с • VBR ${savedSettings.configuredFps}fps • L3 • ${savedSettings.virtualDisplayDensityDpi} dpi • AOA 20B`,
+        statusMessage: `Профиль MediaFormatUtils: ${savedSettings.configuredWidth}×${savedSettings.configuredHeight} • VBR (1) 2.0 Мбит/с • ${savedSettings.configuredFps}fps • Baseline L3 • QP≤36 • ${savedSettings.virtualDisplayDensityDpi} dpi`,
+        matchedProfileLabel: `${savedSettings.configuredWidth}×${savedSettings.configuredHeight} • 2.0 Мбит/с • VBR ${savedSettings.configuredFps}fps • ${savedSettings.virtualDisplayDensityDpi} dpi • AOA 20B (0x00020001)`,
         audioInitForced: true,
       },
       lastTouchOrKeyEvent: 'None — Waiting for Touch/Hardkey Channel (0x0006)',
@@ -707,14 +898,25 @@ export class BridgeController {
       const data: PersistedSettings = {
         appMode: this.runtimeState.appMode,
         logPacketsInUi: this.runtimeState.logPacketsInUi,
+        transmitAudioOverUsb: this.runtimeState.transmitAudioOverUsb,
         mutePhoneSpeakerDuringUsbAudio: this.runtimeState.mutePhoneSpeakerDuringUsbAudio,
+        autoStartOnUsbAttach: this.runtimeState.autoStartOnUsbAttach,
+        keepPhoneScreenOn: this.runtimeState.keepPhoneScreenOn,
+        forceLandscapeMirroring: this.runtimeState.forceLandscapeMirroring,
+        launcherVisiblePackages: this.runtimeState.launcherVisiblePackages,
+        shizukuVdNavButtonsEnabled: this.runtimeState.shizukuVdNavButtonsEnabled,
+        shizukuVdNavButtonsLayout: this.runtimeState.shizukuVdNavButtonsLayout,
         videoSourceMode: this.runtimeState.videoSourceMode,
         appLaunchMode: this.runtimeState.appLaunchMode,
         handshakeTestProfileId: this.runtimeState.handshakeTestProfileId,
         configuredWidth: this.runtimeState.configuredWidth,
         configuredHeight: this.runtimeState.configuredHeight,
+        configuredFps: this.runtimeState.configuredFps,
         configuredBitrateBps: this.runtimeState.configuredBitrateBps,
+        virtualDisplayDensityDpi: this.runtimeState.virtualDisplayDensityDpi,
         useNestedVideoMsgHeader: this.runtimeState.useNestedVideoMsgHeader,
+        shizukuBinderAlive: this.runtimeState.shizukuState.binderAlive,
+        shizukuPermissionGranted: this.runtimeState.shizukuState.permissionGranted,
       };
       localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(data));
     } catch {
@@ -855,7 +1057,7 @@ export class BridgeController {
       const autoResult = this.stateMachine.buildAutoVideoEncoderInitAndStartFrames(
         this.runtimeState.configuredWidth,
         this.runtimeState.configuredHeight,
-        30,
+        this.runtimeState.configuredFps,
         'Профиль Jetta VS7',
         true
       );
@@ -863,6 +1065,12 @@ export class BridgeController {
         const encoded = CarLifeFrameCodec.encodeFrame(out);
         this.recordFrame('TX (S26U -> HU)', out, 0, encoded.length, true);
       }
+
+      const savedVol =
+        this.runtimeState.audioCaptureStats.savedPhoneMusicVolume ??
+        this.runtimeState.audioCaptureStats.currentPhoneMusicVolume;
+      const audioAllowed = this.runtimeState.transmitAudioOverUsb;
+      const shouldMute = audioAllowed && this.runtimeState.mutePhoneSpeakerDuringUsbAudio;
 
       this.checklist = { ...this.checklist, isUsbConnected: true };
       this.runtimeState = {
@@ -879,18 +1087,27 @@ export class BridgeController {
         projectionStats: {
           ...this.runtimeState.projectionStats,
           isRunning: true,
+          fps: this.runtimeState.configuredFps,
           spsPpsConfigured: true,
         },
         audioCaptureStats: {
           ...this.runtimeState.audioCaptureStats,
-          isCapturing: true,
-          mediaInitSent: true,
-          sentInitPackets: this.runtimeState.audioCaptureStats.sentInitPackets + 1,
-          isPhoneSpeakerMutedByBridge: this.runtimeState.mutePhoneSpeakerDuringUsbAudio,
-          statusMessage: 'Аудио 0x0003: активна передача PCM 48кГц Stereo (4096B)',
+          isCapturing: audioAllowed,
+          mediaInitSent: audioAllowed,
+          sentInitPackets: audioAllowed
+            ? this.runtimeState.audioCaptureStats.sentInitPackets + 1
+            : this.runtimeState.audioCaptureStats.sentInitPackets,
+          savedPhoneMusicVolume: savedVol,
+          currentPhoneMusicVolume: shouldMute ? 0 : savedVol,
+          isPhoneSpeakerMutedByBridge: shouldMute,
+          statusMessage: !audioAllowed
+            ? 'Аудио 0x0003 отключено пользователем в общих настройках'
+            : shouldMute
+            ? `Аудио 0x0003: PCM 48кГц Stereo • STREAM_MUSIC=0 (сохранено: ${savedVol})`
+            : 'Аудио 0x0003: активна передача PCM 48кГц Stereo (4096B)',
         },
         lastProtocolEvent:
-          'USB AOA подключён (Jetta VS7) • Рукопожатие 0x0001 завершено • Поток 0x0002 (SPS/PPS + IDR) и аудио 0x0003 открыты ✅',
+          'USB AOA подключён (Jetta VS7) • Рукопожатие 0x0001 завершено • Поток 0x0002 (VBR Baseline L3) и аудио 0x0003 открыты ✅',
       };
       this.startStreamingTelemetryTimers();
     } else {
@@ -918,7 +1135,9 @@ export class BridgeController {
       const stopFrame = CarLifeFrameCodec.createMediaStopFrame();
       this.recordFrame('TX (S26U -> HU)', stopFrame, 0, CarLifeFrameCodec.encodeFrame(stopFrame).length, true);
     }
+    const restoredVol = this.runtimeState.audioCaptureStats.savedPhoneMusicVolume ?? 9;
     this.stateMachine.reset();
+    this.touchRouteState = { lastDownTimeMs: null, activeGestureDown: false };
     this.checklist = { ...this.checklist, isUsbConnected: false };
     this.runtimeState = {
       ...this.runtimeState,
@@ -927,13 +1146,23 @@ export class BridgeController {
       transportState: { kind: 'disconnected' },
       controlSession: this.stateMachine.state,
       isVideoChannelReadyForStreaming: false,
+      usbTxQueueStats: {
+        ...this.runtimeState.usbTxQueueStats,
+        queuedAudioFrames: 0,
+        queuedVideoFrames: 0,
+      },
+      projectionStats: {
+        ...this.runtimeState.projectionStats,
+        touchLastDownTimeMs: null,
+      },
       audioCaptureStats: {
         ...this.runtimeState.audioCaptureStats,
         isCapturing: false,
         isPhoneSpeakerMutedByBridge: false,
-        statusMessage: 'Аудио 0x0003: остановлено (MSG_MEDIA_STOP)',
+        currentPhoneMusicVolume: restoredVol,
+        statusMessage: `Аудио 0x0003: остановлено (MSG_MEDIA_STOP) • STREAM_MUSIC восстановлен (${restoredVol})`,
       },
-      lastProtocolEvent: 'BridgeForegroundService stopped by user',
+      lastProtocolEvent: `BridgeForegroundService stopped • STREAM_MUSIC восстановлен (${restoredVol})`,
     };
     this.emit();
   }
@@ -948,28 +1177,37 @@ export class BridgeController {
       if (!this.runtimeState.isVideoChannelReadyForStreaming || !this.runtimeState.projectionStats.isRunning) {
         return;
       }
+      const fpsBatch = Math.max(10, Math.round(this.runtimeState.configuredFps / 2));
       const nalSample = new Uint8Array([
         0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x24, 0x6c, 0x4b, 0x7f, 0x11, 0x80, 0x00, 0x12, 0x34, 0x56,
       ]);
       const frame = CarLifeFrameCodec.createVideoFrame(nalSample, Date.now() & 0x7fffffff);
       const wireLen = CarLifeFrameCodec.encodeFrame(frame).length + 4200;
-      const nextCount = this.runtimeState.projectionStats.encodedNalFrames + 15;
+      const nextCount = this.runtimeState.projectionStats.encodedNalFrames + fpsBatch;
+      const simulatedQueueDepth = Math.min(5, (this.runtimeState.usbTxQueueStats.queuedVideoFrames + 1) % 4);
+      const droppedDelta = this.runtimeState.appMode === AppMode.MIRRORING && simulatedQueueDepth >= 3 ? 1 : 0;
+
       this.runtimeState = {
         ...this.runtimeState,
-        txFrames: this.runtimeState.txFrames + 15,
-        txBytes: this.runtimeState.txBytes + wireLen * 15,
+        txFrames: this.runtimeState.txFrames + fpsBatch,
+        txBytes: this.runtimeState.txBytes + wireLen * fpsBatch,
         channelFrameCounts: {
           ...this.runtimeState.channelFrameCounts,
-          [CarLifeChannelId.VIDEO]: this.runtimeState.channelFrameCounts[CarLifeChannelId.VIDEO] + 15,
+          [CarLifeChannelId.VIDEO]: this.runtimeState.channelFrameCounts[CarLifeChannelId.VIDEO] + fpsBatch,
+        },
+        usbTxQueueStats: {
+          ...this.runtimeState.usbTxQueueStats,
+          queuedVideoFrames: simulatedQueueDepth,
+          droppedStalePFrames: this.runtimeState.usbTxQueueStats.droppedStalePFrames + droppedDelta,
         },
         projectionStats: {
           ...this.runtimeState.projectionStats,
           encodedNalFrames: nextCount,
-          encodedBytes: this.runtimeState.projectionStats.encodedBytes + wireLen * 15,
+          encodedBytes: this.runtimeState.projectionStats.encodedBytes + wireLen * fpsBatch,
         },
       };
       if (this.runtimeState.logPacketsInUi) {
-        this.recordFrame('TX (S26U -> HU)', frame, 0, wireLen, false, `H.264 Slice #${nextCount}`);
+        this.recordFrame('TX (S26U -> HU)', frame, 0, wireLen, false, `H.264 VBR Slice #${nextCount}`);
       }
       this.emit();
     }, 1000);
@@ -988,6 +1226,11 @@ export class BridgeController {
             ...this.runtimeState.channelFrameCounts,
             [CarLifeChannelId.MEDIA_AUDIO]:
               this.runtimeState.channelFrameCounts[CarLifeChannelId.MEDIA_AUDIO] + 10,
+          },
+          usbTxQueueStats: {
+            ...this.runtimeState.usbTxQueueStats,
+            queuedAudioFrames: 0,
+            prioritizedAudioFrames: this.runtimeState.usbTxQueueStats.prioritizedAudioFrames + 10,
           },
           audioCaptureStats: {
             ...stats,
@@ -1040,6 +1283,104 @@ export class BridgeController {
   }
 
   // --- Settings & Controls ---
+  private syncShizukuBinding(
+    appMode: AppMode,
+    binderAlive: boolean,
+    permissionGranted: boolean,
+    displayId: number
+  ): ShizukuServiceState {
+    const derived = deriveShizukuStatus(binderAlive, permissionGranted);
+    const shouldBind = appMode === AppMode.SHIZUKU_COCKPIT && binderAlive && permissionGranted;
+    if (shouldBind) {
+      this.shizukuService.bind();
+    } else {
+      this.shizukuService.destroy();
+    }
+    return {
+      ...this.runtimeState.shizukuState,
+      binderAlive,
+      permissionGranted,
+      userServiceBound: shouldBind,
+      statusKind: derived.kind,
+      statusLabel: derived.label,
+      boundDisplayId: displayId,
+      lastAidlCall: shouldBind
+        ? `Shizuku.bindUserService(ICarLifeShizukuService) -> bound displayId=${displayId}`
+        : !binderAlive
+        ? 'Shizuku.pingBinder() == false (служба не запущена)'
+        : !permissionGranted
+        ? 'Shizuku.checkSelfPermission() != PERMISSION_GRANTED'
+        : 'ShizukuUserService отвязан (режим не SHIZUKU_COCKPIT)',
+    };
+  }
+
+  requestShizukuPermission(): void {
+    const binderAlive = true;
+    const permissionGranted = true;
+    const displayId = this.runtimeState.projectionStats.virtualDisplayId || 2;
+    const nextShizuku = this.syncShizukuBinding(
+      this.runtimeState.appMode,
+      binderAlive,
+      permissionGranted,
+      displayId
+    );
+    this.runtimeState = {
+      ...this.runtimeState,
+      shizukuState: {
+        ...nextShizuku,
+        lastAidlCall: `Shizuku.requestPermission(${SHIZUKU_REQ_CODE}) -> PERMISSION_GRANTED ✅`,
+      },
+      lastProtocolEvent: `Shizuku.requestPermission(${SHIZUKU_REQ_CODE}) -> права выданы, статус: ${nextShizuku.statusLabel}`,
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
+  openShizukuApp(): void {
+    const intentAction = `packageManager.getLaunchIntentForPackage("${SHIZUKU_PACKAGE_NAME}") ?: Intent(ACTION_VIEW, "market://details?id=${SHIZUKU_PACKAGE_NAME}")`;
+    this.runtimeState = {
+      ...this.runtimeState,
+      shizukuState: {
+        ...this.runtimeState.shizukuState,
+        lastAidlCall: `Открыть Shizuku: ${intentAction}`,
+      },
+      lastProtocolEvent: `Переход в Shizuku (${SHIZUKU_PACKAGE_NAME})`,
+    };
+    this.emit();
+  }
+
+  openDeveloperSettings(): void {
+    const intentAction =
+      'startActivity(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)) [fallback: ACTION_DEVICE_INFO_SETTINGS]';
+    this.runtimeState = {
+      ...this.runtimeState,
+      shizukuState: {
+        ...this.runtimeState.shizukuState,
+        lastAidlCall: `Параметры разработчика: ${intentAction}`,
+      },
+      lastProtocolEvent: 'Открыты Параметры разработчика (Отладка по Wi-Fi)',
+    };
+    this.emit();
+  }
+
+  toggleShizukuDaemonState(): void {
+    const nextBinderAlive = !this.runtimeState.shizukuState.binderAlive;
+    const displayId = this.runtimeState.projectionStats.virtualDisplayId || 2;
+    const nextShizuku = this.syncShizukuBinding(
+      this.runtimeState.appMode,
+      nextBinderAlive,
+      this.runtimeState.shizukuState.permissionGranted,
+      displayId
+    );
+    this.runtimeState = {
+      ...this.runtimeState,
+      shizukuState: nextShizuku,
+      lastProtocolEvent: `Shizuku.pingBinder() = ${nextBinderAlive} (${nextShizuku.statusLabel})`,
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
   setAppMode(mode: AppMode): void {
     const mappedSource =
       mode === AppMode.MIRRORING ? VideoSourceMode.SCREEN_MIRRORING : VideoSourceMode.VIRTUAL_DISPLAY;
@@ -1047,21 +1388,48 @@ export class BridgeController {
       mode === AppMode.MIRRORING
         ? AppLaunchMode.SCREEN_MIRRORING
         : AppLaunchMode.VIRTUAL_DISPLAY_IF_AVAILABLE;
+    const target: TouchDispatchTarget =
+      mode === AppMode.SHIZUKU_COCKPIT
+        ? 'SHIZUKU_INPUT_MANAGER'
+        : mode === AppMode.COCKPIT
+        ? 'PRESENTATION_DECOR_VIEW'
+        : 'ACCESSIBILITY_DISPATCH_GESTURE';
+    const vdId = mappedSource === VideoSourceMode.VIRTUAL_DISPLAY ? 2 : 0;
+    this.touchRouteState = { lastDownTimeMs: null, activeGestureDown: false };
+
+    const nextShizuku = this.syncShizukuBinding(
+      mode,
+      this.runtimeState.shizukuState.binderAlive,
+      this.runtimeState.shizukuState.permissionGranted,
+      vdId || 2
+    );
+
     this.runtimeState = {
       ...this.runtimeState,
       appMode: mode,
       videoSourceMode: mappedSource,
       appLaunchMode: mappedLaunch,
-      logPacketsInUi: mode === AppMode.COCKPIT,
+      shizukuState: nextShizuku,
       projectionStats: {
         ...this.runtimeState.projectionStats,
         appMode: mode,
         videoSourceMode: mappedSource,
-        virtualDisplayId: mappedSource === VideoSourceMode.VIRTUAL_DISPLAY ? 2 : 0,
+        virtualDisplayId: vdId,
+        touchRouteTarget: target,
+        touchLastDownTimeMs: null,
         activeCockpitWidget:
-          mode === AppMode.COCKPIT ? 'Виртуальный экран (VD #2) активен' : 'Зеркалирование экрана готово',
+          mode === AppMode.SHIZUKU_COCKPIT
+            ? `Shizuku VD #${vdId} (${nextShizuku.statusLabel})`
+            : mode === AppMode.COCKPIT
+            ? `Виртуальный экран (VD #${vdId}) активен`
+            : 'Зеркалирование экрана готово',
       },
-      lastProtocolEvent: `Режим работы: ${APP_MODE_META[mode].title}`,
+      lastProtocolEvent:
+        mode === AppMode.SHIZUKU_COCKPIT
+          ? `Режим SHIZUKU_COCKPIT: VD #${vdId} (1280×720@30fps VBR 160dpi) • тач 0x0006 -> ICarLifeShizukuService.injectTouch (${nextShizuku.statusLabel})`
+          : mode === AppMode.COCKPIT
+          ? 'Режим КОКПИТ: тач 0x0006 -> presentation.window.decorView.dispatchTouchEvent (AccessibilityService OFF)'
+          : 'Режим ЗЕРКАЛИРОВАНИЕ: тач 0x0006 -> CarLifeAccessibilityService.dispatchGesture',
     };
     this.persistSettings();
     this.emit();
@@ -1079,24 +1447,201 @@ export class BridgeController {
     this.emit();
   }
 
+  setTransmitAudioOverUsb(enabled: boolean): void {
+    const savedVol = this.runtimeState.audioCaptureStats.savedPhoneMusicVolume ?? 9;
+    if (!enabled && this.runtimeState.audioCaptureStats.isCapturing) {
+      const stopFrame = CarLifeFrameCodec.createMediaStopFrame();
+      this.recordFrame(
+        'TX (S26U -> HU)',
+        stopFrame,
+        0,
+        CarLifeFrameCodec.encodeFrame(stopFrame).length,
+        true,
+        'MSG_MEDIA_STOP (0x00030002)'
+      );
+    }
+    this.runtimeState = {
+      ...this.runtimeState,
+      transmitAudioOverUsb: enabled,
+      audioCaptureStats: {
+        ...this.runtimeState.audioCaptureStats,
+        isCapturing: enabled ? this.runtimeState.audioCaptureStats.isCapturing : false,
+        isPhoneSpeakerMutedByBridge: enabled
+          ? this.runtimeState.audioCaptureStats.isPhoneSpeakerMutedByBridge
+          : false,
+        currentPhoneMusicVolume: enabled
+          ? this.runtimeState.audioCaptureStats.currentPhoneMusicVolume
+          : savedVol,
+        statusMessage: enabled
+          ? 'Аудио 0x0003: разрешена передача PCM 48 кГц Stereo по USB'
+          : `Аудио 0x0003: выключено (звук остаётся на телефоне/Bluetooth, STREAM_MUSIC=${savedVol})`,
+      },
+      lastProtocolEvent: enabled
+        ? 'Передача звука по USB (канал 0x0003): ВКЛ'
+        : 'Передача звука по USB (канал 0x0003): ВЫКЛ',
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
+  setAutoStartOnUsbAttach(enabled: boolean): void {
+    this.runtimeState = {
+      ...this.runtimeState,
+      autoStartOnUsbAttach: enabled,
+      lastProtocolEvent: enabled
+        ? 'Автозапуск при подключении USB-кабеля (USB_ACCESSORY_ATTACHED): ВКЛ'
+        : 'Автозапуск при подключении USB-кабеля: ВЫКЛ (только ручной старт)',
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
+  setKeepPhoneScreenOn(enabled: boolean): void {
+    this.runtimeState = {
+      ...this.runtimeState,
+      keepPhoneScreenOn: enabled,
+      lastProtocolEvent: enabled
+        ? 'FLAG_KEEP_SCREEN_ON при зеркалировании: ВКЛ'
+        : 'FLAG_KEEP_SCREEN_ON при зеркалировании: ВЫКЛ',
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
+  setForceLandscapeMirroring(enabled: boolean): void {
+    this.runtimeState = {
+      ...this.runtimeState,
+      forceLandscapeMirroring: enabled,
+      lastProtocolEvent: enabled
+        ? 'Принудительная альбомная ориентация при зеркалировании: ВКЛ'
+        : 'Принудительная альбомная ориентация при зеркалировании: ВЫКЛ (авто)',
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
+  toggleLauncherAppVisibility(packageName: string): void {
+    const current = this.runtimeState.launcherVisiblePackages;
+    const exists = current.includes(packageName);
+    let next: string[];
+    if (exists) {
+      if (current.length <= 1) {
+        return; // Keep at least one app in the launcher grid
+      }
+      next = current.filter((p) => p !== packageName);
+    } else {
+      next = [...current, packageName];
+    }
+    this.runtimeState = {
+      ...this.runtimeState,
+      launcherVisiblePackages: next,
+      lastProtocolEvent: `Сетка лаунчера ГУ: выбрано ${next.length} из ${COCKPIT_INSTALLED_APPS.length} приложений`,
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
+  setLauncherVisiblePreset(preset: 'all' | 'auto'): void {
+    const next =
+      preset === 'all'
+        ? COCKPIT_INSTALLED_APPS.map((a) => a.packageName)
+        : COCKPIT_INSTALLED_APPS.filter((a) => a.isAutomotivePriority).map((a) => a.packageName);
+    this.runtimeState = {
+      ...this.runtimeState,
+      launcherVisiblePackages: next,
+      lastProtocolEvent:
+        preset === 'all'
+          ? `Сетка лаунчера ГУ: выбраны все приложения (${next.length})`
+          : `Сетка лаунчера ГУ: только навигация и медиа (${next.length})`,
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
+  setShizukuVdNavButtonsEnabled(enabled: boolean): void {
+    this.runtimeState = {
+      ...this.runtimeState,
+      shizukuVdNavButtonsEnabled: enabled,
+      lastProtocolEvent: enabled
+        ? 'Системные кнопки «Домой / Назад» на VirtualDisplay (Shizuku): ВКЛ'
+        : 'Системные кнопки «Домой / Назад» на VirtualDisplay (Shizuku): ВЫКЛ',
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
+  setShizukuVdNavButtonsLayout(layout: 'dock' | 'floating'): void {
+    this.runtimeState = {
+      ...this.runtimeState,
+      shizukuVdNavButtonsLayout: layout,
+      lastProtocolEvent:
+        layout === 'dock'
+          ? 'Кнопки Домой/Назад на VirtualDisplay: боковой док'
+          : 'Кнопки Домой/Назад на VirtualDisplay: плавающая панель Overlay',
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
+  setCanvasTestCardEnabled(enabled: boolean): void {
+    const mode = enabled
+      ? VideoSourceMode.CANVAS_TEST_CARD
+      : this.runtimeState.appMode === AppMode.MIRRORING
+      ? VideoSourceMode.SCREEN_MIRRORING
+      : VideoSourceMode.VIRTUAL_DISPLAY;
+    const vdId = mode === VideoSourceMode.VIRTUAL_DISPLAY ? 2 : 0;
+    this.runtimeState = {
+      ...this.runtimeState,
+      videoSourceMode: mode,
+      projectionStats: {
+        ...this.runtimeState.projectionStats,
+        videoSourceMode: mode,
+        virtualDisplayId: vdId,
+        isRunning: true,
+        activeCockpitWidget: VIDEO_SOURCE_META[mode].title,
+      },
+      lastProtocolEvent: enabled
+        ? 'Тест-карта (Canvas) включена для отладки видеоканала 0x0002'
+        : `Тест-карта (Canvas) выключена -> ${VIDEO_SOURCE_META[mode].title}`,
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
   setMutePhoneSpeakerDuringUsbAudio(enabled: boolean): void {
+    const isCapturing = this.runtimeState.audioCaptureStats.isCapturing;
+    const savedVol =
+      this.runtimeState.audioCaptureStats.savedPhoneMusicVolume ??
+      this.runtimeState.audioCaptureStats.currentPhoneMusicVolume;
+    const shouldMuteNow = enabled && isCapturing;
+
     this.runtimeState = {
       ...this.runtimeState,
       mutePhoneSpeakerDuringUsbAudio: enabled,
       audioCaptureStats: {
         ...this.runtimeState.audioCaptureStats,
         mutePhoneSpeakerDuringUsbAudio: enabled,
-        isPhoneSpeakerMutedByBridge: enabled && this.runtimeState.audioCaptureStats.isCapturing,
+        savedPhoneMusicVolume: savedVol,
+        currentPhoneMusicVolume: shouldMuteNow ? 0 : savedVol,
+        isPhoneSpeakerMutedByBridge: shouldMuteNow,
+        statusMessage: isCapturing
+          ? shouldMuteNow
+            ? `Аудио 0x0003: PCM 48кГц Stereo • STREAM_MUSIC=0 (сохранено: ${savedVol})`
+            : `Аудио 0x0003: активна передача PCM 48кГц Stereo (STREAM_MUSIC=${savedVol})`
+          : this.runtimeState.audioCaptureStats.statusMessage,
       },
       lastProtocolEvent: enabled
         ? 'Глушить динамик телефона при USB-звуке: ВКЛ'
-        : 'Глушить динамик телефона при USB-звуке: ВЫКЛ',
+        : `Глушить динамик телефона при USB-звуке: ВЫКЛ (STREAM_MUSIC=${savedVol})`,
     };
     this.persistSettings();
     this.emit();
   }
 
   toggleAudioCapture(): void {
+    if (!this.runtimeState.transmitAudioOverUsb) {
+      this.setTransmitAudioOverUsb(true);
+    }
     const currentlyCapturing = this.runtimeState.audioCaptureStats.isCapturing;
     if (currentlyCapturing) {
       const stopFrame = CarLifeFrameCodec.createMediaStopFrame();
@@ -1108,16 +1653,18 @@ export class BridgeController {
         true,
         'MSG_MEDIA_STOP (0x00030002)'
       );
+      const restoredVol = this.runtimeState.audioCaptureStats.savedPhoneMusicVolume ?? 9;
       this.runtimeState = {
         ...this.runtimeState,
         audioCaptureStats: {
           ...this.runtimeState.audioCaptureStats,
           isCapturing: false,
           isPhoneSpeakerMutedByBridge: false,
+          currentPhoneMusicVolume: restoredVol,
           sentStopPackets: this.runtimeState.audioCaptureStats.sentStopPackets + 1,
-          statusMessage: 'Аудио 0x0003: остановлено (MSG_MEDIA_STOP)',
+          statusMessage: `Аудио 0x0003: остановлено (MSG_MEDIA_STOP) • STREAM_MUSIC восстановлен (${restoredVol})`,
         },
-        lastProtocolEvent: 'Аудиоканал 0x0003 остановлен (MSG_MEDIA_STOP)',
+        lastProtocolEvent: `Аудиоканал 0x0003 остановлен • STREAM_MUSIC восстановлен (${restoredVol})`,
       };
     } else {
       const initFrame = CarLifeFrameCodec.createMediaInitFrame();
@@ -1129,6 +1676,11 @@ export class BridgeController {
         true,
         'MSG_MEDIA_INIT (48kHz Stereo 16-bit)'
       );
+      const savedVol =
+        this.runtimeState.audioCaptureStats.currentPhoneMusicVolume > 0
+          ? this.runtimeState.audioCaptureStats.currentPhoneMusicVolume
+          : this.runtimeState.audioCaptureStats.savedPhoneMusicVolume ?? 9;
+      const shouldMute = this.runtimeState.mutePhoneSpeakerDuringUsbAudio;
       this.runtimeState = {
         ...this.runtimeState,
         audioCaptureStats: {
@@ -1136,10 +1688,16 @@ export class BridgeController {
           isCapturing: true,
           mediaInitSent: true,
           sentInitPackets: this.runtimeState.audioCaptureStats.sentInitPackets + 1,
-          isPhoneSpeakerMutedByBridge: this.runtimeState.mutePhoneSpeakerDuringUsbAudio,
-          statusMessage: 'Аудио 0x0003: активна передача PCM 48кГц Stereo (4096B)',
+          savedPhoneMusicVolume: savedVol,
+          currentPhoneMusicVolume: shouldMute ? 0 : savedVol,
+          isPhoneSpeakerMutedByBridge: shouldMute,
+          statusMessage: shouldMute
+            ? `Аудио 0x0003: PCM 48кГц Stereo • STREAM_MUSIC=0 (сохранено: ${savedVol})`
+            : 'Аудио 0x0003: активна передача PCM 48кГц Stereo (4096B)',
         },
-        lastProtocolEvent: 'Аудиоканал 0x0003 запущен (MSG_MEDIA_INIT 48000 Hz Stereo)',
+        lastProtocolEvent: shouldMute
+          ? `Аудио 0x0003 запущен • STREAM_MUSIC снижен до 0 (сохранено: ${savedVol})`
+          : 'Аудиоканал 0x0003 запущен (MSG_MEDIA_INIT 48000 Hz Stereo)',
       };
     }
     this.emit();
@@ -1147,7 +1705,17 @@ export class BridgeController {
 
   setVideoSourceMode(mode: VideoSourceMode): void {
     const mappedAppMode =
-      mode === VideoSourceMode.SCREEN_MIRRORING ? AppMode.MIRRORING : AppMode.COCKPIT;
+      mode === VideoSourceMode.SCREEN_MIRRORING
+        ? AppMode.MIRRORING
+        : this.runtimeState.appMode === AppMode.SHIZUKU_COCKPIT
+        ? AppMode.SHIZUKU_COCKPIT
+        : AppMode.COCKPIT;
+    const target: TouchDispatchTarget =
+      mappedAppMode === AppMode.SHIZUKU_COCKPIT
+        ? 'SHIZUKU_INPUT_MANAGER'
+        : mappedAppMode === AppMode.COCKPIT
+        ? 'PRESENTATION_DECOR_VIEW'
+        : 'ACCESSIBILITY_DISPATCH_GESTURE';
     this.runtimeState = {
       ...this.runtimeState,
       appMode: mappedAppMode,
@@ -1157,6 +1725,7 @@ export class BridgeController {
         appMode: mappedAppMode,
         videoSourceMode: mode,
         virtualDisplayId: mode === VideoSourceMode.VIRTUAL_DISPLAY ? 2 : 0,
+        touchRouteTarget: target,
         isRunning: true,
         activeCockpitWidget: VIDEO_SOURCE_META[mode].title,
       },
@@ -1194,6 +1763,11 @@ export class BridgeController {
       ...this.runtimeState,
       configuredWidth: width,
       configuredHeight: height,
+      mediaCodecConfig: {
+        ...this.runtimeState.mediaCodecConfig,
+        width,
+        height,
+      },
       projectionStats: {
         ...this.runtimeState.projectionStats,
         width,
@@ -1204,7 +1778,43 @@ export class BridgeController {
         negotiatedVideoWidth: width,
         negotiatedVideoHeight: height,
       },
-      lastProtocolEvent: `Видеоконфигурация обновлена: ${width}×${height} @ ${this.runtimeState.configuredBitrateBps / 1000} кбит/с`,
+      lastProtocolEvent: `Видеоконфигурация обновлена: ${width}×${height} @ ${this.runtimeState.configuredBitrateBps / 1000} кбит/с (VBR ${this.runtimeState.configuredFps}fps)`,
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
+  setFps(fps: 25 | 30): void {
+    this.runtimeState = {
+      ...this.runtimeState,
+      configuredFps: fps,
+      mediaCodecConfig: {
+        ...this.runtimeState.mediaCodecConfig,
+        frameRate: fps,
+      },
+      projectionStats: {
+        ...this.runtimeState.projectionStats,
+        fps,
+      },
+      controlSession: {
+        ...this.runtimeState.controlSession,
+        negotiatedFps: fps,
+      },
+      lastProtocolEvent: `Частота кадров MediaCodec: ${fps} fps (VBR Baseline L3, I=1s, QP≤36)`,
+    };
+    this.persistSettings();
+    this.emit();
+  }
+
+  setDensityDpi(dpi: 160 | 180 | 200): void {
+    this.runtimeState = {
+      ...this.runtimeState,
+      virtualDisplayDensityDpi: dpi,
+      mediaCodecConfig: {
+        ...this.runtimeState.mediaCodecConfig,
+        virtualDisplayDensityDpi: dpi,
+      },
+      lastProtocolEvent: `VirtualDisplay densityDpi для MediaProjection: ${dpi} dpi`,
     };
     this.persistSettings();
     this.emit();
@@ -1215,11 +1825,15 @@ export class BridgeController {
     this.runtimeState = {
       ...this.runtimeState,
       configuredBitrateBps: bps,
+      mediaCodecConfig: {
+        ...this.runtimeState.mediaCodecConfig,
+        bitrateBps: bps,
+      },
       projectionStats: {
         ...this.runtimeState.projectionStats,
         bitRateKbps: kbps,
       },
-      lastProtocolEvent: `Битрейт H.264 обновлён: ${kbps} кбит/с (CBR 30fps)`,
+      lastProtocolEvent: `Битрейт H.264 обновлён: ${kbps} кбит/с (VBR ${this.runtimeState.configuredFps}fps)`,
     };
     this.persistSettings();
     this.emit();
@@ -1249,7 +1863,7 @@ export class BridgeController {
         spsPpsConfigured: nextRunning,
       },
       lastProtocolEvent: nextRunning
-        ? `Конвейер видеозаписи запущен (${this.runtimeState.configuredWidth}×${this.runtimeState.configuredHeight}@30fps)`
+        ? `Конвейер H.264 запущен (${this.runtimeState.configuredWidth}×${this.runtimeState.configuredHeight}@${this.runtimeState.configuredFps}fps VBR)`
         : 'Конвейер видеозаписи остановлен',
     };
     this.emit();
@@ -1257,6 +1871,8 @@ export class BridgeController {
 
   startJettaVs7DefaultVd(): void {
     this.setResolution(1280, 720);
+    this.setFps(30);
+    this.setDensityDpi(160);
     this.setBitrateKbps(2000);
     this.setVideoHeaderMode(true);
     this.setVideoSourceMode(VideoSourceMode.VIRTUAL_DISPLAY);
@@ -1269,41 +1885,83 @@ export class BridgeController {
         virtualDisplayId: 2,
         spsPpsConfigured: true,
       },
-      lastProtocolEvent: 'Стартован VD #2 (1280×720 • 2.0 Мбит/с • 160 dpi • AOA 20B)',
+      lastProtocolEvent: 'Стартован VD #2 (1280×720 • VBR 2.0 Мбит/с • 160 dpi • AOA 20B)',
     };
     this.emit();
   }
 
   injectTestTouch(x: number, y: number): void {
-    const frame = CarLifeTouchDecoder.createTouchActionFrame(
+    const downFrame = CarLifeTouchDecoder.createTouchActionFrame(
       0,
       x,
       y,
       this.runtimeState.configuredWidth,
       this.runtimeState.configuredHeight
     );
-    const wireLen = CarLifeFrameCodec.encodeFrame(frame).length;
-    this.recordFrame('RX (HU -> S26U)', frame, wireLen, 0, true);
-    const ev = CarLifeTouchDecoder.decodeTouchChannelFrame(
-      frame,
-      1920,
-      1080,
+    const upFrame = CarLifeTouchDecoder.createTouchActionFrame(
+      1,
+      x,
+      y,
       this.runtimeState.configuredWidth,
       this.runtimeState.configuredHeight
     );
-    const label =
-      ev && ev.kind === 'touch'
-        ? this.runtimeState.appMode === AppMode.MIRRORING
-          ? `Touch ${ev.type}: HU(${ev.rawX},${ev.rawY}) -> Mirroring (AccessibilityService)`
-          : `Touch ${ev.type}: HU(${ev.rawX},${ev.rawY}) -> Cockpit VD(${Math.round(ev.scaledX)},${Math.round(ev.scaledY)})`
-        : `Touch (${x}, ${y})`;
+    const wireLenDown = CarLifeFrameCodec.encodeFrame(downFrame).length;
+    const wireLenUp = CarLifeFrameCodec.encodeFrame(upFrame).length;
+    this.recordFrame('RX (HU -> S26U)', downFrame, wireLenDown, 0, true);
+    this.recordFrame('RX (HU -> S26U)', upFrame, wireLenUp, 0, true);
+
+    const nowMs = Date.now();
+    const downRoute = routeTouchEventByMode(
+      this.runtimeState.appMode,
+      CarLifeTouchEventType.DOWN,
+      x,
+      y,
+      this.runtimeState.configuredWidth,
+      this.runtimeState.configuredHeight,
+      this.touchRouteState,
+      nowMs
+    );
+    const heldDownTime = downRoute.nextState.lastDownTimeMs;
+    const upRoute = routeTouchEventByMode(
+      this.runtimeState.appMode,
+      CarLifeTouchEventType.UP,
+      x,
+      y,
+      this.runtimeState.configuredWidth,
+      this.runtimeState.configuredHeight,
+      downRoute.nextState,
+      nowMs + 45
+    );
+    this.touchRouteState = upRoute.nextState;
+
+    const label = `${downRoute.result.summary} -> UP(downTime=${heldDownTime})`;
+    let nextShizukuState = this.runtimeState.shizukuState;
+    if (this.runtimeState.appMode === AppMode.SHIZUKU_COCKPIT) {
+      const vdId = this.runtimeState.projectionStats.virtualDisplayId || 2;
+      const aidlCall = this.shizukuService.injectTouch(
+        0,
+        downRoute.result.dispatchedX,
+        downRoute.result.dispatchedY,
+        heldDownTime ?? nowMs,
+        nowMs,
+        vdId
+      );
+      nextShizukuState = {
+        ...nextShizukuState,
+        lastAidlCall: aidlCall,
+        injectedTouchCount: nextShizukuState.injectedTouchCount + 2,
+      };
+    }
 
     this.runtimeState = {
       ...this.runtimeState,
+      shizukuState: nextShizukuState,
       projectionStats: {
         ...this.runtimeState.projectionStats,
-        injectedTouches: this.runtimeState.projectionStats.injectedTouches + 1,
+        injectedTouches: this.runtimeState.projectionStats.injectedTouches + 2,
         lastTouchPoint: [x, y],
+        touchRouteTarget: downRoute.result.target,
+        touchLastDownTimeMs: heldDownTime,
       },
       lastTouchOrKeyEvent: label,
       lastProtocolEvent: label,
@@ -1358,23 +2016,67 @@ export class BridgeController {
         controlSession: transition.updatedState,
       };
     } else if (decoded.header.channel === CarLifeChannelId.TOUCH) {
-      const ev = CarLifeTouchDecoder.decodeTouchChannelFrame(decoded, 1920, 1080, 1280, 720);
+      const targetBounds =
+        this.runtimeState.appMode === AppMode.MIRRORING
+          ? { w: 3120, h: 1440 }
+          : { w: 1280, h: 720 };
+      const ev = CarLifeTouchDecoder.decodeTouchChannelFrame(
+        decoded,
+        targetBounds.w,
+        targetBounds.h,
+        1280,
+        720
+      );
       let evStr = 'None';
+      let nextDownTime: number | null = this.runtimeState.projectionStats.touchLastDownTimeMs;
+      let nextShizukuState = this.runtimeState.shizukuState;
       if (ev?.kind === 'touch') {
-        evStr = `${ev.type} Raw(${ev.rawX},${ev.rawY} @ ${ev.huWidth}x${ev.huHeight}) -> Scaled(${Math.round(ev.scaledX)},${Math.round(ev.scaledY)} @ 1920x1080)`;
+        const vdId = this.runtimeState.projectionStats.virtualDisplayId || 2;
+        const routed = routeTouchEventByMode(
+          this.runtimeState.appMode,
+          ev.type,
+          ev.rawX,
+          ev.rawY,
+          ev.huWidth,
+          ev.huHeight,
+          this.touchRouteState,
+          Date.now(),
+          undefined,
+          vdId
+        );
+        this.touchRouteState = routed.nextState;
+        nextDownTime = routed.result.downTimeMs;
+        evStr = routed.result.summary;
+        if (this.runtimeState.appMode === AppMode.SHIZUKU_COCKPIT) {
+          const aidlCall = this.shizukuService.injectTouch(
+            ev.type === CarLifeTouchEventType.UP ? 1 : ev.type === CarLifeTouchEventType.MOVE ? 2 : 0,
+            routed.result.dispatchedX,
+            routed.result.dispatchedY,
+            routed.result.downTimeMs,
+            routed.result.eventTimeMs,
+            vdId
+          );
+          nextShizukuState = {
+            ...nextShizukuState,
+            lastAidlCall: aidlCall,
+            injectedTouchCount: nextShizukuState.injectedTouchCount + 1,
+          };
+        }
       } else if (ev?.kind === 'hardkey') {
         evStr = `HardKey ${ev.mappedKey?.label ?? 'UNKNOWN'} -> Android KeyCode ${ev.androidKeyCode}`;
         if (ev.mappedKey?.id === 'SEEK_ADD') {
           this.skipNextTrack();
         }
       }
-      extraAnalysis = `\n• Touch/Key Decoded: ${evStr}`;
+      extraAnalysis = `\n• Touch/Key Routed: ${evStr}`;
       this.runtimeState = {
         ...this.runtimeState,
+        shizukuState: nextShizukuState,
         lastTouchOrKeyEvent: evStr,
         projectionStats: {
           ...this.runtimeState.projectionStats,
           injectedTouches: this.runtimeState.projectionStats.injectedTouches + 1,
+          touchLastDownTimeMs: nextDownTime,
         },
       };
     }
@@ -1509,8 +2211,21 @@ export class BridgeController {
   // --- Launcher & Media Actions ---
   launchApp(app: InstalledAppInfo): void {
     const mode = this.runtimeState.appLaunchMode;
-    const vdId = this.runtimeState.projectionStats.virtualDisplayId;
-    if (mode === AppLaunchMode.VIRTUAL_DISPLAY_IF_AVAILABLE && vdId > 0) {
+    const vdId = this.runtimeState.projectionStats.virtualDisplayId || 2;
+    let nextShizukuState = this.runtimeState.shizukuState;
+
+    if (this.runtimeState.appMode === AppMode.SHIZUKU_COCKPIT) {
+      const amCmd = this.shizukuService.launchAppOnDisplay(app.packageName, app.activityName, vdId);
+      nextShizukuState = {
+        ...nextShizukuState,
+        lastAidlCall: `launchAppOnDisplay -> ${amCmd}`,
+        amStartCount: nextShizukuState.amStartCount + 1,
+      };
+      this.lastLaunchStatus = `Shizuku VD #${vdId}: ${amCmd}`;
+    } else if (
+      mode === AppLaunchMode.VIRTUAL_DISPLAY_IF_AVAILABLE &&
+      this.runtimeState.projectionStats.virtualDisplayId > 0
+    ) {
       this.lastLaunchStatus = `Запущено: ${app.label} (${app.packageName}) -> VirtualDisplay #${vdId}`;
     } else {
       const modeSuffix =
@@ -1521,6 +2236,7 @@ export class BridgeController {
     }
     this.runtimeState = {
       ...this.runtimeState,
+      shizukuState: nextShizukuState,
       projectionStats: {
         ...this.runtimeState.projectionStats,
         activeCockpitWidget: `${app.label} • Активно`,
@@ -1531,6 +2247,23 @@ export class BridgeController {
   }
 
   triggerDockHome(): void {
+    if (this.runtimeState.appMode === AppMode.SHIZUKU_COCKPIT) {
+      const vdId = this.runtimeState.projectionStats.virtualDisplayId || 2;
+      const cmd = this.shizukuService.sendKeyEvent(KEYCODE_HOME, vdId);
+      this.lastLaunchStatus = `Shizuku KeyEvent: ${cmd}`;
+      this.runtimeState = {
+        ...this.runtimeState,
+        shizukuState: {
+          ...this.runtimeState.shizukuState,
+          lastAidlCall: `sendKeyEvent(KEYCODE_HOME=3, displayId=${vdId}) -> ${cmd}`,
+          keyEventCount: this.runtimeState.shizukuState.keyEventCount + 1,
+        },
+        lastTouchOrKeyEvent: `HardKey HOME (0x00000001) -> ${cmd}`,
+      };
+      this.emit();
+      return;
+    }
+
     this.lastLaunchStatus = 'Команда Домой (CarLifeAccessibilityService GLOBAL_ACTION_HOME)';
     this.runtimeState = {
       ...this.runtimeState,
@@ -1540,6 +2273,23 @@ export class BridgeController {
   }
 
   triggerDockBack(): void {
+    if (this.runtimeState.appMode === AppMode.SHIZUKU_COCKPIT) {
+      const vdId = this.runtimeState.projectionStats.virtualDisplayId || 2;
+      const cmd = this.shizukuService.sendKeyEvent(KEYCODE_BACK, vdId);
+      this.lastLaunchStatus = `Shizuku KeyEvent: ${cmd}`;
+      this.runtimeState = {
+        ...this.runtimeState,
+        shizukuState: {
+          ...this.runtimeState.shizukuState,
+          lastAidlCall: `sendKeyEvent(KEYCODE_BACK=4, displayId=${vdId}) -> ${cmd}`,
+          keyEventCount: this.runtimeState.shizukuState.keyEventCount + 1,
+        },
+        lastTouchOrKeyEvent: `HardKey BACK (0x0000000E) -> ${cmd}`,
+      };
+      this.emit();
+      return;
+    }
+
     this.lastLaunchStatus = 'Команда Назад (CarLifeAccessibilityService GLOBAL_ACTION_BACK)';
     this.runtimeState = {
       ...this.runtimeState,

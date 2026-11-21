@@ -1,22 +1,26 @@
-# Нативный пакет Android (Kotlin / AIDL / Gradle) — CarLife Bridge
+# CarLife Bridge — Самостоятельный Android-проект (Kotlin + Compose + Shizuku)
 
-Все подготовленные файлы в папке `android-export/` предназначены для переноса в ваш Android Studio / Gradle-проект (базовый пакет `com.carlife.bridge`) и последующей сборки `.apk`.
+Каталог `android-export/` (и архив `carlife-bridge-android-kotlin-patch.zip`) содержит полный Gradle-проект, готовый к облачной сборке APK через GitHub Actions или в Android Studio.
 
-## Состав пакета
-1. `app/build.gradle.kts` — зависимости `dev.rikka.shizuku:api:13.1.5`, `dev.rikka.shizuku:provider:13.1.5`, Jetpack Compose и включённый `aidl = true`.
-2. `app/src/main/AndroidManifest.xml` — `rikka.shizuku.ShizukuProvider`, `CarLifeAccessibilityService`, `BridgeForegroundService` (`mediaProjection|connectedDevice`), разрешения и фильтр `USB_ACCESSORY_ATTACHED`.
-3. `app/src/main/aidl/com/carlife/bridge/ICarLifeShizukuService.aidl` — AIDL-интерфейс для запуска приложений и ввода на втором `VirtualDisplay`.
-4. `model/AppMode.kt` — enum `AppMode` (`COCKPIT`, `MIRRORING`, `SHIZUKU_COCKPIT`), `ShizukuStatus`, `BridgeSettings`.
-5. `video/MediaCodecEncoderConfig.kt` — настройка H.264 `MediaCodec` по `MediaFormatUtils.smali` (`1280×720`, `25/30 fps`, `2_000_000`, `BITRATE_MODE_VBR`, `AVCProfileBaseline`, `AVCLevel3`, `KEY_REPEAT_PREVIOUS_FRAME_AFTER = 100_000L`, `KEY_PRIORITY = 0`, `video-qp-p-max = 36`, `densityDpi = 160..200`).
-6. `transport/UsbTxTransportEngine.kt` — приоритетный поток отправки USB AOA на `LinkedBlockingQueue` (`THREAD_PRIORITY_URGENT_AUDIO`, приоритет `0x0003` над `0x0002`, сброс устаревших P-кадров при очереди > 5).
-7. `audio/UsbAudio0x0003Capture.kt` — захват `AudioPlaybackCapture` (`48 кГц Stereo PCM`, 4096B) с сохранением/глушением и восстановлением `STREAM_MUSIC`.
-8. `touch/CarLifeTouchRouter.kt` — строгая маршрутизация `0x0006` по режимам (`decorView.dispatchTouchEvent` / `CarLifeAccessibilityService.dispatchGesture` / `ICarLifeShizukuService.injectTouch`).
-9. `shizuku/CarLifeShizukuService.kt` и `shizuku/ShizukuBridgeManager.kt` — реализация AIDL `UserService`, привязка Shizuku и переходы в Shizuku / «Параметры разработчика».
-10. `ui/UnifiedSettingsScreen.kt` — реорганизованный Compose-экран «Настройки» с 4 блоками и сворачиваемой инструкцией Shizuku.
+## Структура проекта
+- `.github/workflows/build-apk.yml` — автосборка `app-debug.apk` в GitHub Actions (JDK 17 + Android SDK + Gradle 8.10.2).
+- `settings.gradle.kts`, `build.gradle.kts`, `gradle.properties`, `gradle/wrapper/gradle-wrapper.properties` — корневая конфигурация Gradle.
+- `app/build.gradle.kts` — зависимости Jetpack Compose, `dev.rikka.shizuku:api:13.1.5`, `dev.rikka.shizuku:provider:13.1.5` и включённый `aidl = true`.
+- `app/src/main/AndroidManifest.xml` — `ShizukuProvider`, `MainActivity`, `BridgeForegroundService` (`mediaProjection|connectedDevice`), `CarLifeAccessibilityService`, фильтр `USB_ACCESSORY_ATTACHED`.
+- `app/src/main/res/` — `accessory_filter.xml`, `carlife_accessibility_config.xml`, `strings.xml`.
+- `app/src/main/aidl/com/carlife/bridge/ICarLifeShizukuService.aidl` — AIDL-интерфейс для запуска приложений и ввода на втором экране.
+- `app/src/main/java/com/carlife/bridge/`:
+  - `MainActivity.kt` — экран настроек, привязка Shizuku, управление `FLAG_KEEP_SCREEN_ON` и альбомной ориентацией.
+  - `model/AppMode.kt` — режимы (`COCKPIT`, `MIRRORING`, `SHIZUKU_COCKPIT`), статусы Shizuku и `BridgeSettings`.
+  - `video/MediaCodecEncoderConfig.kt` — профиль H.264 VBR Baseline L3 (`MediaFormatUtils.smali`) и создание `VirtualDisplay`.
+  - `transport/UsbTxTransportEngine.kt` — приоритетный TX-поток на `LinkedBlockingQueue` (`URGENT_AUDIO`, сброс устаревших P-кадров > 5).
+  - `audio/UsbAudio0x0003Capture.kt` — `AudioPlaybackCapture` (`48 кГц Stereo PCM`) + сохранение и глушение `STREAM_MUSIC`.
+  - `touch/CarLifeTouchRouter.kt` и `touch/CarLifeAccessibilityService.kt` — строгая маршрутизация тача `0x0006` по режимам.
+  - `shizuku/CarLifeShizukuService.kt` и `shizuku/ShizukuBridgeManager.kt` — AIDL `UserService` и переходы в Shizuku / «Параметры разработчика».
+  - `service/BridgeForegroundService.kt` — фоновый сервис с `WakeLock` и приоритетной очередью USB.
+  - `ui/UnifiedSettingsScreen.kt` — экран «Настройки» с 4 блоками и сворачиваемой инструкцией Shizuku.
 
-## Сборка APK в Android Studio / терминале
-Скопируйте файлы в ваш Android-проект (заменив пакет `com.carlife.bridge` на ваш, если он отличается) и выполните:
-```bash
-./gradlew assembleDebug
-```
-Готовый APK появится в `app/build/outputs/apk/debug/app-debug.apk`.
+## Как собрать APK через GitHub Actions (без Android Studio)
+1. Распакуйте `carlife-bridge-android-kotlin-patch.zip` в новый (или пустой) репозиторий GitHub — обязательно вместе со скрытой папкой `.github/`.
+2. Откройте репозиторий на GitHub → вкладка **Actions** → **Build Android APK** → нажмите **Run workflow** (или просто сделайте `git push` в `main`/`master`).
+3. После завершения сборки скачайте готовый файл внизу страницы в разделе **Artifacts → carlife-bridge-debug-apk** (`app-debug.apk`).

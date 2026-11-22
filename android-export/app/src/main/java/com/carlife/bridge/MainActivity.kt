@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -236,8 +237,17 @@ class MainActivity : ComponentActivity() {
                                 audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             },
                             onRequestMediaProjection = {
-                                val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                                mediaProjectionLauncher.launch(mpm.createScreenCaptureIntent())
+                                val mediaProjectionManager =
+                                    getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                                val captureIntent =
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                                        mediaProjectionManager.createScreenCaptureIntent(
+                                            MediaProjectionConfig.createConfigForDefaultDisplay()
+                                        )
+                                    } else {
+                                        mediaProjectionManager.createScreenCaptureIntent()
+                                    }
+                                mediaProjectionLauncher.launch(captureIntent)
                             },
                             onRequestShizuku = {
                                 shizukuManager.requestPermission()

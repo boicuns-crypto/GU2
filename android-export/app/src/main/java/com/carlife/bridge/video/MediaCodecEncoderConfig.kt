@@ -113,8 +113,8 @@ object MediaCodecEncoderConfig {
             width,
             height,
             densityDpi.coerceIn(160, 200),
-            flags,
             surface,
+            flags,
             null,
             null
         )
